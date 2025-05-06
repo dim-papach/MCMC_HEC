@@ -331,7 +331,8 @@ tar_target(
 
       # Save in same directory as data
       output_dir <- dirname(file_path)
-      output_file <- file.path(output_dir, paste0("histograms_step", step, ".png"))
+      output_file <- file.path(output_dir, 
+                              paste0("histograms_step", step, ".png"))
       ggsave(output_file, plot = p, width = 12, height = 8, dpi = 300)
 
       output_file
@@ -340,44 +341,15 @@ tar_target(
   format = "file"
 ),
 
-# Combine /results/model_name/WholeHEC/stacked_step5_model_name.csv with
-# tables/Hec_50.csv based in the stack$id and Hec$ID columns
-tar_target(
-  combine_results,
-  {
-    # Process each model
-    combined_results <- map_dfr(model_names, function(model) {
-      # Read model's final cumulative data
-      stacked_file <- here::here("results", model, "WholeHEC", paste0("stacked_step5_", model, ".csv"))
-      stacked_data <- read_csv(
-        stacked_file,
-        col_types = cols(
-          .default = col_double(),
-          id = col_integer(),
-          source_dataset = col_character(),
-          model = col_character(),
-          base_group = col_character()
-        )
-      )
-      # Alternative renaming that definitely preserves types
-      new_names <- names(stacked_data) %>%
-        if_else(. == "id", ., paste0(., "_", model))
-      names(stacked_data) <- new_names
-      # Read Hec_50 data
-      hec_50_data <- read_csv(here::here("tables", "Hec_50.csv"), show_col_types = FALSE)
-
-      # Merge based on ID columns
-      left_join(stacked_data, hec_50_data, by = c("id" = "ID")) %>%
-        mutate(model = model)
-    })
-
-    # Save combined results
-    output_file <- here::here("tables", "MCMC_results.csv")
-    write_csv(combined_results, output_file)
-    output_file
-  },
-  format = "file"
-)
+# MCMC results ------------------------------------------------------
+  tar_target(
+    combined_data,
+    combine_model_results(
+      model_names = model_names,
+      results_dir = "results",
+      output_file = "tables/MCMC_results.csv"
+    ),
+    format = "file"  # Track file changes
+  )
 
 )
-
