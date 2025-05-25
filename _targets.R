@@ -2,9 +2,6 @@
 
 library(targets)
 library(tarchetypes)
-library(future)
-library(cmdstanr)
-library(tidyverse)
 
 tar_source()
 
@@ -27,11 +24,10 @@ list(
     data_files,
     c(
       "tables/Hec_10.csv",
-      "tables/Hec_2-10.csv",
-      "tables/Hec_11-20.csv",
-      "tables/Hec_21-30.csv",
-      "tables/Hec_31-40.csv",
-      "tables/Hec_41-50.csv"
+      "tables/Hec_11-20.csv"
+      #"tables/Hec_21-30.csv",
+      #"tables/Hec_31-40.csv",
+      #"tables/Hec_41-50.csv"
     )
   ),
 
@@ -39,11 +35,10 @@ list(
     data_names,
     c(
       "Hec_10",
-      "Hec_2-10",
-      "Hec_11-20",
-      "Hec_21-30",
-      "Hec_31-40",
-      "Hec_41-50"
+      "Hec_11-20"
+      #"Hec_21-30",
+      #"Hec_31-40",
+      #"Hec_41-50"
     )
   ),
 
@@ -62,15 +57,15 @@ list(
   # Model definitions ------------------------------------------------
   tar_target(
     model_names,
-    c("np", "uni", "skew")
+    c("np", "uni")#, "skew")
   ),
 
   tar_target(
     stan_files,
     c(
       np = "x.stan",
-      uni = "uniform.stan",
-      skew = "skew.stan"
+      uni = "uniform.stan"
+      #skew = "skew.stan"
     )
   ),
 
@@ -99,16 +94,30 @@ list(
       )
 
       # Fit the model
-      init_vals <- init_function(6, nrow(data_list$data))
+      chains <- 1
+      init_vals <- init_function(chains, nrow(data_list$data))
       fit <- model$sample(
         data            = stan_data,
-        chains          = 6,
+        chains          = chains,
         parallel_chains = 6,
-        iter_sampling   = 4000,
-        iter_warmup     = 1500,
+        iter_sampling   = 700,
+        iter_warmup     = 300,
         init            = init_vals,
-        refresh         = 100
+        refresh         = 100,
+        max_treedepth   = 12,
       )
+      # Save the fit object to the output directory .mcmc_models
+      output_dir <- here::here(".mcmc_models",data_list$data_name)
+      dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+      fit$summary()
+
+      qs::qsave(
+        x=fit,
+        file = file.path(output_dir, paste0(model_list$names, ".qs")),
+        nthread = 3
+      )
+
       # Return fit object
       list(
         fit = fit,
@@ -122,8 +131,9 @@ list(
 
 
   # Process results --------------------------------
+  ## Configuration target --------------------------------
   tar_target(
-    write_summary,
+    summary_config,
     {
       # Verify required components exist
       stopifnot(
@@ -131,38 +141,65 @@ list(
         !is.null(fit_model$model_name)
       )
 
-      params <- c("t_sf", "tau", "A", "x", "id")
-      suffix <- fit_model$model_name
-      data_name <- fit_model$data_name
+      list(
+        params = c("t_sf", "tau", "A", "x", "id", "logSFR_today_pred"),
+        suffix = fit_model$model_name,
+        data_name = fit_model$data_name,
+        output_dir = here::here(fit_model$data_name, fit_model$model_name)
+      )
+    },
+    pattern = map(fit_model)
+  ),
+  # Summary data target --------------------------------
+  tar_target(
+    summary_data,
+    {
+      dir.create(summary_config$output_dir, showWarnings = FALSE, recursive = TRUE)
 
-      output_dir <- here::here(data_name, suffix)
-      dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+      # Extract the summary of the parameters
+      summary
 
-      # Process individual parameters
-      individual_files <- purrr::map_chr(params, function(param) {
-        filename <- file.path(output_dir, paste0(param, "_", suffix, ".csv"))
-        fit_model$fit$summary(variable = param) |>
+    },
+    pattern = map(summary_config)
+  ),
+
+  # Write individual parameter files --------------------------------
+  tar_target(
+    param_files,
+    {
+      purrr::map_chr(summary_config$params, function(param) {
+        filename <- file.path(
+          summary_config$output_dir,
+          paste0(param, "_", summary_config$suffix, ".csv")
+        )
+        summary_data |>
           readr::write_csv(filename)
         filename
       })
+    },
+    pattern = map(summary_config, summary_data),
+    format = "file"
+  ),
 
-      # Create combined summary with param and param_sd columns
-      combined_summary <- purrr::map_dfc(params, function(param) {
-        summary_row <- fit_model$fit$summary(variable = param)
+  # Write combined summary file --------------------------------
+  tar_target(
+    combined_file,
+    {
+      combined <- purrr::map_dfc(summary_config$params, function(param) {
+        param_data <- summary_data |>
         tibble::tibble(
-          "{param}" := summary_row$mean,
-          "{param}_sd" := summary_row$sd
+          "{param}" := param_data$mean,
+          "{param}_sd" := param_data$sd
         )
       })
-
-      # Save combined summary
-      combined_file <- file.path(output_dir, paste0("combined_summary_", suffix, ".csv"))
-      readr::write_csv(combined_summary, combined_file)
-
-      # Return all created files
-      c(individual_files, combined_file)
+      filename <- file.path(
+        summary_config$output_dir,
+        paste0("combined_summary_", summary_config$suffix, ".csv")
+      )
+      readr::write_csv(combined, filename)
+      filename
     },
-    pattern = map(fit_model),
+    pattern = map(summary_config, summary_data),
     format = "file"
   ),
 
@@ -201,155 +238,6 @@ list(
     },
     pattern = map(fit_model),
     format = "file"
-  ),
-
-# Combined summaries ------------------------------------------------------
-tar_target(
-  combined_model_summaries,
-  {
-    # Define base datasets and their cumulative groupings
-    base_groups <- list(
-      "WholeHEC" = c("Hec_10", "Hec_11-20", "Hec_21-30", "Hec_31-40", "Hec_41-50"),
-      "WholeHEC-2Mpc" = c("Hec_2-10", "Hec_11-20", "Hec_21-30", "Hec_31-40", "Hec_41-50")
-    )
-
-    # For each model and base group, combine cumulative summaries
-    map_dfr(names(base_groups), function(base_name) {
-      map_dfr(model_names, function(current_model) {
-        # Get all relevant dataset groups for this base
-        cumulative_groups <- accumulate(base_groups[[base_name]], ~ c(.x, .y))
-
-        # Process each cumulative combination
-        map_dfr(seq_along(cumulative_groups), function(n) {
-          current_datasets <- cumulative_groups[[n]]
-
-          # Collect all summary files for these datasets
-          summary_files <- file.path(
-            here::here(current_datasets, current_model),
-            paste0("combined_summary_", current_model, ".csv")
-          )
-
-          # Read and vertically concatenate summaries
-          combined <- map_dfr(summary_files, ~ {
-            read_csv(.x, show_col_types = FALSE) |>
-              mutate(source_dataset = str_extract(.x, "Hec_[^/]+"))
-          }) |>
-            mutate(
-              cumulative_step = n,
-              model = current_model,
-              base_group = base_name
-            )
-
-          # Save combined summary with new directory structure
-          output_dir <- here::here("results", current_model, base_name)
-          dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
-          output_file <- file.path(
-            output_dir,
-            paste0("stacked_step", n, "_", current_model, ".csv")
-          )
-          write_csv(combined, output_file)
-
-          tibble(file = output_file, model = current_model, group = base_name)
-        })
-      })
-    }) |>
-      pull(file) |>
-      unlist()
-  },
-  pattern = map(model_names),
-  cue = tar_cue(mode = "always"),
-  format = "file"
-),
-
-
-# Visualizations --------------------------------
-
-  tar_target(
-    histograms,
-    #Histograms of models per 10 Mpc
-    {
-      # Validate inputs
-      stopifnot(
-        !is.null(fit_model$data_name),
-        !is.null(fit_model$model_name)
-      )
-
-      # Set base directory using write_summary's output structure
-      base_dir <- here::here(fit_model$data_name, fit_model$model_name)
-
-      # Generate histograms from saved files
-      create_file_based_histograms(fit_model, base_dir)
-    },
-    pattern = map(fit_model),
-    format = "file"
-  ),
-
-# Faceted Histograms ------------------------------------------------------
-# Faceted Histograms ------------------------------------------------------
-tar_target(
-  cumulative_histograms,
-  {
-    # Get all stacked summary files
-    stacked_files <- list.files(
-      here::here("results"),
-      pattern = "stacked_step\\d+_.+\\.csv",
-      recursive = TRUE,
-      full.names = TRUE
-    )
-
-    # Create one plot per stacked file
-    map(stacked_files, function(file_path) {
-      # Read data and extract metadata
-      data <- read_csv(file_path, show_col_types = FALSE)
-      model <- str_extract(file_path, "(?<=results/)[^/]+")
-      base_group <- str_extract(file_path, "(?<=/)[^/]+(?=/)")
-      step <- str_extract(file_path, "(?<=stacked_step)\\d+")
-
-      # Prepare data for plotting
-      plot_data <- data |>
-        pivot_longer(
-          cols = c(t_sf, tau, A, x, t_sf_sd, tau_sd, A_sd, x_sd),
-          names_to = "parameter",
-          values_to = "value"
-        )
-
-      # Create faceted histogram
-      p <- ggplot(plot_data, aes(x = value, fill = source_dataset)) +
-        geom_histogram(alpha = 0.7, bins = 30, position = "identity") +
-        facet_wrap(vars(parameter), ncol = 4, scales = "free") +
-        labs(
-          title = paste("Parameter Distributions:", model, "-", base_group),
-          subtitle = paste("Cumulative Step", step),
-          x = "Value",
-          y = "Count"
-        ) +
-        theme_minimal() +
-        theme(
-          legend.position = "bottom",
-          strip.text = element_text(size = 8)
-        )
-
-      # Save in same directory as data
-      output_dir <- dirname(file_path)
-      output_file <- file.path(output_dir, 
-                              paste0("histograms_step", step, ".png"))
-      ggsave(output_file, plot = p, width = 12, height = 8, dpi = 300)
-
-      output_file
-    }) |> unlist()
-  },
-  format = "file"
-),
-
-# MCMC results ------------------------------------------------------
-  tar_target(
-    combined_data,
-    combine_model_results(
-      model_names = model_names,
-      results_dir = "results",
-      output_file = "tables/MCMC_results.csv"
-    ),
-    format = "file"  # Track file changes
   )
 
 )

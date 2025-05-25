@@ -88,15 +88,15 @@ sfr_comparison_plot <- function(sfr_diff, logSFR_pred, logSFR_total) {
       ),
       width = 0.1
     ) +
-    # # legend for keep and discard = "Kept data", "Discarded data"+ the number of points for eac
-    # scale_color_manual(
-    #   values = c("Keep" = default_colors[2], "Discard" = default_colors[1]),
-    #   breaks = c("Keep", "Discard"),
-    #   labels = c(
-    #     paste("Kept data (n =", sum(sfr_diff$flag == "Keep"), ")"),
-    #     paste("Discarded data (n =", sum(sfr_diff$flag == "Discard"), ")")
-    #   )
-    # ) +
+    # legend for keep and discard = "kept data", "discarded data"+ the number of points for eac
+    scale_color_manual(
+      values = c("keep" = default_colors[2], "discard" = default_colors[1]),
+      breaks = c("keep", "discard"),
+      labels = c(
+        paste("kept data (n =", sum(sfr_diff$flag == "keep"), ")"),
+        paste("discarded data (n =", sum(sfr_diff$flag == "discard"), ")")
+      )
+     ) +
     geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
     xlim(-8, 1) +
     labs(
@@ -179,11 +179,14 @@ create_file_based_histograms <- function(fit_model, base_dir) {
   output_files
 }
 
-combine_model_results <- function(model_names, results_dir = "results", output_file = "tables/MCMC_results.csv", stop_on_error = TRUE) {
+combine_model_results <- function(model_names, results_dir = "results",
+                                  stop_on_error = TRUE)
+{
   tryCatch({
     # Read and rename each model's data
     model_data_list <- purrr::map(model_names, function(model) {
-      stacked_file <- here::here(results_dir, model, "WholeHEC", paste0("stacked_step5_", model, ".csv"))
+      stacked_file <- here::here(results_dir, model, "WholeHEC",
+                            paste0("stacked_step5_", model, ".csv"))
       
       readr::read_csv(
         stacked_file,
@@ -211,8 +214,7 @@ combine_model_results <- function(model_names, results_dir = "results", output_f
     final_data <- dplyr::left_join(combined_results, hec_50_data, by = "id")
     
     # Save output
-    readr::write_csv(final_data, here::here(output_file))
-    return(here::here(output_file))
+    return(final_data)
   }, error = function(e) {
     message("Error in combine_model_results: ", e$message)
     if (stop_on_error) {

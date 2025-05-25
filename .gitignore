@@ -1,2 +1,5 @@
 .RData
 .Rhistory
+/tables/*.fits
+/HEC_*/
+.mcmc_*/

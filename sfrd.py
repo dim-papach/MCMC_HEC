@@ -1,329 +1,422 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
-import scipy.integrate
 from astropy.cosmology import Planck18 as cosmo
 import astropy.units as u
 import os
 
-# set wd as the directory of the script
+# Set working directory to the script location
 script_dir = os.path.dirname(os.path.abspath(__file__))
 os.chdir(script_dir)
-
 
 # Create output directory
 os.makedirs('sfrd_plots', exist_ok=True)
 
-# Load data once at start
-data = pd.read_csv('tables/MCMC_results.csv')
+# Global constants
 T0 = 13.8 * 1e9  # Age of the Universe in years
+D_VALUES = [(10, 5), (20, 15), (30, 25), (50, 45)]
+REDSHIFTS = np.linspace(0, 10, 100)
+REDSHIFT_TICKS = np.array([0, 2, 4, 6, 8, 10])
 
-# Load ALL parameters once (before volume loops)
-# Uniform Prior
-A_uni = data['A_uni'].values
-tau_uni = (data['tau_uni']*u.Gyr.to(u.yr)).values
-tsf_uni = (data['t_sf_uni']*u.Gyr.to(u.yr)).values
-tstart_uni = T0 - tsf_uni
-sd_A_uni = data['A_sd_uni'].values
-sd_tau_uni = (data['tau_sd_uni']*u.Gyr.to(u.yr)).values
-sd_tsf_uni = (data['t_sf_sd_uni']*u.Gyr.to(u.yr)).values
-sd_tstart_uni = sd_tsf_uni
 
-# Normal Prior
-A_norm = data['A_np'].values
-tau_norm = (data['tau_np']*u.Gyr.to(u.yr)).values
-tsf_norm = (data['t_sf_np']*u.Gyr.to(u.yr)).values
-tstart_norm = T0 - tsf_norm
-sd_A_norm = data['A_sd_np'].values
-sd_tau_norm = (data['tau_sd_np']*u.Gyr.to(u.yr)).values
-sd_tsf_norm = (data['t_sf_sd_np']*u.Gyr.to(u.yr)).values
-sd_tstart_norm = sd_tsf_norm
-
-# Skew Prior
-A_skew = data['A_skew'].values
-tau_skew = (data['tau_skew']*u.Gyr.to(u.yr)).values
-tsf_skew = (data['t_sf_skew']*u.Gyr.to(u.yr)).values
-tstart_skew = T0 - tsf_skew
-sd_A_skew = data['A_sd_skew'].values
-sd_tau_skew = (data['tau_sd_skew']*u.Gyr.to(u.yr)).values
-sd_tsf_skew = (data['t_sf_sd_skew']*u.Gyr.to(u.yr)).values
-sd_tstart_skew = sd_tsf_skew
-
-# Define volume parameters
-D_values = [(10, 8), (20, 18), (30, 28), (50, 48)]
-redshifts = np.linspace(0, 10, 100)
-
-# Core functions (unchanged)
 def sfr_function(t, A, tau, V):
+    """Calculate the star formation rate."""
     return A * (t / tau**2) * np.exp(-t / tau) / V
 
+
 def sfr_error(T_current, t_start, A, tau, sd_A, sd_tau, sd_t_start, V):
+    """Calculate the error in star formation rate using error propagation."""
     t_Gyr = T_current - t_start
     t_years = t_Gyr * 1e9
+    
     dSFR_dA = (t_years / tau**2) * np.exp(-t_years / tau) / V
     dSFR_dtau = A * np.exp(-t_years / tau) * ((2 * t_years / tau**3) - (t_years**2 / tau**4)) / V
     dSFR_dt = -A * np.exp(-t_years / tau) * ((1 / tau) - (t_years / tau**2)) / V
+    
     sd_t_start_years = sd_t_start * 1e9
     return np.sqrt((dSFR_dA * sd_A)**2 + (dSFR_dtau * sd_tau)**2 + (dSFR_dt * sd_t_start_years)**2)
 
+
 def compute_total_sfr_and_error(z_array, t_start, sd_t_start, A_values, tau_values, V, 
                               sd_A_values=None, sd_tau_values=None):
+    """Compute total SFR, error, and track valid galaxies for each redshift."""
     total_sfr = np.zeros_like(z_array)
     total_sfr_error = np.zeros_like(z_array)
+    n_valid_galaxies = np.zeros_like(z_array, dtype=int)
+    
     for i, z in enumerate(z_array):
-        T_current = cosmo.age(z).value
-        t = T_current*10**9 - t_start 
+        T_current = cosmo.age(z).to(u.yr).value
+        t = T_current - t_start 
         valid = t > 0
-        t_years = t[valid]
-        sfr_i = np.zeros_like(t)
+        n_valid_galaxies[i] = np.sum(valid)
+        
         if np.any(valid):
+            t_years = t[valid]
+            sfr_i = np.zeros_like(t)
             sfr_i[valid] = sfr_function(t_years, A_values[valid], tau_values[valid], V)
-        total_sfr[i] = np.sum(sfr_i)
-        if sd_A_values is not None and sd_tau_values is not None:
-            sd_sfr_i = np.zeros_like(t)
-            if np.any(valid):
-                sd_sfr_i[valid] = sfr_error(T_current, t_start[valid], A_values[valid],
-                                             tau_values[valid], sd_A_values[valid],
-                                             sd_tau_values[valid], sd_t_start[valid], V)
-            total_sfr_error[i] = np.sqrt(np.sum(sd_sfr_i**2))
-    return total_sfr, total_sfr_error
+            total_sfr[i] = np.sum(sfr_i)
+            
+            if sd_A_values is not None and sd_tau_values is not None:
+                sd_sfr_i = np.zeros_like(t)
+                sd_sfr_i[valid] = sfr_error(
+                    T_current, t_start[valid], A_values[valid],
+                    tau_values[valid], sd_A_values[valid],
+                    sd_tau_values[valid], sd_t_start[valid], V
+                )
+                total_sfr_error[i] = np.sqrt(np.sum(sd_sfr_i**2))
+    
+    return total_sfr, total_sfr_error, n_valid_galaxies
+
 
 def compute_log_sfr_and_error(total_sfr, total_sfr_error):
+    """Convert SFR and its error to log scale."""
     log_sfr = np.log10(total_sfr)
     log_sfr_error = (total_sfr_error / total_sfr) / np.log(10)
     return log_sfr, log_sfr_error
 
+
 def lilly_madau(z):
+    """Lilly-Madau SFRD parameterization."""
     return 0.015 * ((1 + z)**2.7) / (1 + ((1 + z)/2.9)**5.6)
 
+
 def comoving_distance(z):
+    """Calculate comoving distance for a given redshift."""
     return cosmo.comoving_distance(z).value
 
+
 def ratio_error(total_sfr, total_sfr_error, sfrd_lilly_madau):
+    """Calculate error in the ratio of SFRD values."""
     return np.sqrt(np.abs(sfrd_lilly_madau/total_sfr**2*total_sfr_error**2))
 
-# Process volumes
-for D, D_minus_2 in D_values:
-    for current_D in [D, D_minus_2]:
-        V = (4/3 * np.pi * current_D**3)
-        # From all the data, keep only the rows with D_v2<= current_D
-        # get a fresh DataFrame slice for this volume
-        sub = data[data['D_v2'] <= current_D]
-        
-        # now pull arrays from that slice
-        A_uni     = sub['A_uni'].values
-        tau_uni   = (sub['tau_uni']*u.Gyr.to(u.yr)).values
-        tstart_uni= T0 - (sub['t_sf_uni']*u.Gyr.to(u.yr)).values
-        sd_A_uni  = sub['A_sd_uni'].values
-        sd_tau_uni= (sub['tau_sd_uni']*u.Gyr.to(u.yr)).values
-        sd_tstart_uni = (sub['t_sf_sd_uni']*u.Gyr.to(u.yr)).values
 
-        A_norm     = sub['A_np'].values
-        tau_norm   = (sub['tau_np']*u.Gyr.to(u.yr)).values
-        tstart_norm= T0 - (sub['t_sf_np']*u.Gyr.to(u.yr)).values
-        sd_A_norm  = sub['A_sd_np'].values
-        sd_tau_norm= (sub['tau_sd_np']*u.Gyr.to(u.yr)).values
-        sd_tstart_norm = (sub['t_sf_sd_np']*u.Gyr.to(u.yr)).values
-
-        A_skew     = sub['A_skew'].values
-        tau_skew   = (sub['tau_skew']*u.Gyr.to(u.yr)).values
-        tstart_skew= T0 - (sub['t_sf_skew']*u.Gyr.to(u.yr)).values
-        sd_A_skew  = sub['A_sd_skew'].values
-        sd_tau_skew= (sub['tau_sd_skew']*u.Gyr.to(u.yr)).values
-        sd_tstart_skew = (sub['t_sf_sd_skew']*u.Gyr.to(u.yr)).values
+def extract_parameters(df, D):
+    """Extract and filter parameters for a given diameter."""
+    # Filter data by diameter
+    sub = df[df['D_v2'] <= D].copy()
+    
+    # Initialize parameter dictionary
+    params = {}
+    
+    # Extract parameters for each prior type
+    for prior in ['uni', 'np', 'skew']:
+        # Map column name suffixes to variable names
+        suffix_map = {
+            'uni': 'uniform',
+            'np': 'norm', 
+            'skew': 'skew'
+        }
+        key = suffix_map[prior]
         
-        # Compute SFRs using pre-loaded arrays
-        total_sfr_uni, total_sfr_error_uni = compute_total_sfr_and_error(
-            redshifts, tstart_uni, sd_tstart_uni,
-            A_uni, tau_uni, V,
-            sd_A_uni, sd_tau_uni
+        # Extract parameters
+        params[f'A_{key}'] = sub[f'A_{prior}'].values
+        params[f'tau_{key}'] = (sub[f'tau_{prior}'] * 1e9).values
+        params[f'tstart_{key}'] = T0 - (sub[f't_sf_{prior}'] * 1e9).values
+        params[f'sd_A_{key}'] = sub[f'A_sd_{prior}'].values
+        params[f'sd_tau_{key}'] = (sub[f'tau_sd_{prior}'] * 1e9).values
+        params[f'sd_tstart_{key}'] = (sub[f't_sf_sd_{prior}'] * 1e9).values
+        
+        # Filter by log difference criterion
+        mask = np.abs(np.log10(sub[f'sfr_{prior}']) - np.log10(sub['SFR_total'])) < 10
+        
+        # Apply mask to parameters
+        for param_name in [f'A_{key}', f'tau_{key}', f'tstart_{key}', 
+                          f'sd_A_{key}', f'sd_tau_{key}', f'sd_tstart_{key}']:
+            params[param_name][~mask] = np.nan
+    
+    return params
+
+
+def plot_sfrd_comparison(redshifts, log_sfr_data, log_sfr_errors, log_sfrd_lm, D, 
+                        lookback_times, co_moving_distances, ir, uv):
+    """Create SFRD comparison plot."""
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    ax2 = ax1.twiny()
+    ax3 = ax1.twiny()
+    ax3.spines['top'].set_position(('outward', 40))
+
+    # Plot data for each prior
+    markers = ['o-', 's-', 'v-']
+    for i, prior in enumerate(['uniform', 'norm', 'skew']):
+        ax1.errorbar(
+            redshifts, log_sfr_data[prior], yerr=log_sfr_errors[prior],
+            fmt=markers[i], capsize=3, label=f"{prior.capitalize()} Prior", markersize=4
+        )
+    
+    # Plot Lilly-Madau SFRD from ir and uv data
+    log_v = ir["log_v"]
+    log_v_upper = ir["log_v_upper_error"]
+    log_v_lower = ir["log_v_lower_error"]
+    z_min = ir['z_min']
+    z_max = ir['z_max']
+    z = np.mean([z_min, z_max], axis=0)
+    z_error = (z_max- z_min).replace(0, 0.001) / 2  # Avoid division by zero
+    ax1.errorbar(z, log_v,xerr=z_error , yerr=[log_v_lower, log_v_upper], fmt='o', capsize=3, label='MD14 (IR)', markersize=4, color='orange')
+
+    log_v = uv["log_v"]
+    log_v_upper = uv["log_v_upper_error"]
+    log_v_lower = uv["log_v_lower_error"]
+    z_min = uv['z_min']
+    z_max = uv['z_max']
+    z = np.mean([z_min, z_max], axis=0)
+    z_error = (z_max - z_min).replace(0, 0.001) / 2  # Avoid division by zero
+    ax1.errorbar(z, log_v,xerr=z_error , yerr=[log_v_lower, log_v_upper], fmt='o', capsize=3, label='MD14 (UV)', markersize=4, color='red')
+
+    # Plot Lilly-Madau reference
+    ax1.plot(redshifts, log_sfrd_lm, 'k--', linewidth=2, label="Lilly-Madau (2014)")
+
+    # Configure axes
+    ax1.set_xlabel("Redshift $z$")
+    ax1.set_ylabel(r"$\log_{10}\left(\text{SFRD}\ \left[\text{M}_\odot \text{yr}^{-1} \text{Mpc}^{-3}\right]\right)$")
+    ax1.set_title(f"SFRD Comparison (D = {D} Mpc)")
+    ax1.axvline(x=1.86, color='r', linestyle='--', alpha=0.5)
+    ax1.legend()
+    ax1.grid(True)
+    
+    # Secondary and tertiary x-axes
+    configure_multiple_x_axes(ax1, ax2, ax3, lookback_times, co_moving_distances)
+    
+    plt.tight_layout()
+    plt.savefig(f'sfrd_plots/sfrd_comparison_D{D}.png', dpi=300)
+    plt.close()
+
+
+def plot_residuals(redshifts, log_sfrd_lm, log_sfr_data, log_sfr_errors, D, 
+                 lookback_times, co_moving_distances):
+    """Create SFRD residuals plot."""
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    ax2 = ax1.twiny()
+    ax3 = ax1.twiny()
+    ax3.spines['top'].set_position(('outward', 40))
+
+    # Calculate and plot residuals for each prior
+    markers = ['o-', 's-', 'v-']
+    for i, prior in enumerate(['uniform', 'norm', 'skew']):
+        residuals = log_sfrd_lm - log_sfr_data[prior]
+        ax1.errorbar(
+            redshifts, residuals, yerr=log_sfr_errors[prior],
+            fmt=markers[i], capsize=3, label=f"{prior.capitalize()} Prior", markersize=4
+        )
+    
+    ax1.axhline(0, color='k', linestyle='--', alpha=0.7)
+    ax1.axvline(x=1.86, color='r', linestyle='--', alpha=0.5)
+    ax1.set_xlabel("Redshift $z$")
+    ax1.set_ylabel(r"$\Delta \log_{10}(\text{SFRD})$")
+    ax1.set_title(f"SFRD Residuals (D = {D} Mpc)")
+    ax1.legend()
+    ax1.grid(True)
+    
+    # Configure axes
+    configure_multiple_x_axes(ax1, ax2, ax3, lookback_times, co_moving_distances)
+    
+    plt.tight_layout()
+    plt.savefig(f'sfrd_plots/sfrd_residuals_D{D}.png', dpi=300)
+    plt.close()
+
+
+def plot_ratio(redshifts, sfrd_lilly_madau, total_sfr_data, total_sfr_errors, D, 
+             lookback_times, co_moving_distances):
+    """Create SFRD ratio plot."""
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    ax2 = ax1.twiny()
+    ax3 = ax1.twiny()
+    ax3.spines['top'].set_position(('outward', 40))
+
+    # Calculate and plot ratios for each prior
+    markers = ['o-', 's-', 'v-']
+    for i, prior in enumerate(['uniform', 'norm', 'skew']):
+        # Calculate ratio and its error avoiding division by zero
+        ratio = sfrd_lilly_madau / total_sfr_data[prior]
+        ratio[total_sfr_data[prior] == 0] = np.nan
+        
+        ratio_err = ratio_error(total_sfr_data[prior], total_sfr_errors[prior], sfrd_lilly_madau)
+        ax1.errorbar(
+            redshifts, ratio, yerr=ratio_err,
+            fmt=markers[i], capsize=3, label=f"{prior.capitalize()} Prior", markersize=4
+        )
+    
+    ax1.axhline(1, color='k', linestyle='--', alpha=0.7)
+    ax1.axvline(x=1.86, color='r', linestyle='--', alpha=0.5)
+    ax1.set_xlabel("Redshift $z$")
+    ax1.set_ylabel(r"$\frac{\text{SFRD}_{\text{LM}}}{\text{SFRD}_{\text{Data}}}$")
+    ax1.set_ylim(-1, 5)
+    ax1.set_title(f"SFRD Ratio (D = {D} Mpc)")
+    ax1.legend()
+    ax1.grid(True)
+    
+    # Configure axes
+    configure_multiple_x_axes(ax1, ax2, ax3, lookback_times, co_moving_distances)
+    
+    plt.tight_layout()
+    plt.savefig(f'sfrd_plots/sfrd_ratio_D{D}.png', dpi=300)
+    plt.close()
+
+
+def plot_valid_galaxies(redshifts, total_sfr_norm, n_valid_norm, D):
+    """Plot SFRD vs. number of valid galaxies."""
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    ax2 = ax1.twinx()
+    
+    # SFRD (left axis)
+    ax1.plot(redshifts, np.log10(total_sfr_norm), 'b-', label='SFRD (Norm Prior)')
+    ax1.set_xlabel("Redshift")
+    ax1.set_ylabel(r"$\log_{10}(\text{SFRD})$ [M$_\odot$ yr$^{-1}$ Mpc$^{-3}$]")
+    
+    # Valid galaxies (right axis)
+    ax2.plot(redshifts, n_valid_norm, 'r--', label='Valid Galaxies (t > 0)')
+    ax2.set_ylabel("Number of Valid Galaxies")
+    
+    ax1.legend(loc='upper left')
+    ax2.legend(loc='upper right')
+    plt.title(f"SFRD vs. Valid Galaxies (Normal Prior, D = {D} Mpc)")
+    plt.savefig(f"sfrd_plots/valid_galaxies_D{D}.png")
+    plt.close()
+
+
+def configure_multiple_x_axes(ax1, ax2, ax3, lookback_times, co_moving_distances):
+    """Configure multiple x-axes with proper labels and ticks."""
+    # Configure all x-axes
+    for ax in [ax1, ax2, ax3]:
+        ax.set_xlim(10, 0)
+        ax.set_xticks(REDSHIFT_TICKS)
+        ax.invert_xaxis()
+    
+    # Add labels for secondary axes
+    ax2.set_xticklabels([f"{t:.1f}" for t in lookback_times])
+    ax3.set_xticklabels([f"{d:.1f}" for d in co_moving_distances])
+    ax2.set_xlabel("Lookback time [Gyr]")
+    ax3.set_xlabel("Co-moving distance [cGpc]")
+
+
+def process_volume(D, data, ir, uv):
+    """Process data for a specific volume diameter."""
+    V = (4/3 * np.pi * D**3)
+    
+    # Extract parameters
+    params = extract_parameters(data, D)
+    
+    # Compute SFRs for each prior
+    results = {}
+    for prior in ['uniform', 'norm', 'skew']:
+        total_sfr, total_sfr_error, n_valid = compute_total_sfr_and_error(
+            REDSHIFTS, 
+            params[f'tstart_{prior}'], params[f'sd_tstart_{prior}'],
+            params[f'A_{prior}'], params[f'tau_{prior}'], V,
+            params[f'sd_A_{prior}'], params[f'sd_tau_{prior}']
         )
         
-        total_sfr_norm, total_sfr_error_norm = compute_total_sfr_and_error(
-            redshifts, tstart_norm, sd_tstart_norm,
-            A_norm, tau_norm, V,
-            sd_A_norm, sd_tau_norm
-        )
+        # Store results
+        results[f'total_sfr_{prior}'] = total_sfr
+        results[f'total_sfr_error_{prior}'] = total_sfr_error
+        results[f'n_valid_{prior}'] = n_valid
         
-        total_sfr_skew, total_sfr_error_skew = compute_total_sfr_and_error(
-            redshifts, tstart_skew, sd_tstart_skew,
-            A_skew, tau_skew, V,
-            sd_A_skew, sd_tau_skew
-        )
-
         # Compute log values
-        log_sfr_uni, log_sfr_error_uni = compute_log_sfr_and_error(total_sfr_uni, total_sfr_error_uni)
-        log_sfr_norm, log_sfr_error_norm = compute_log_sfr_and_error(total_sfr_norm, total_sfr_error_norm)
-        log_sfr_skew, log_sfr_error_skew = compute_log_sfr_and_error(total_sfr_skew, total_sfr_error_skew)
-
-        # Lilly-Madau calculations
-        sfrd_lilly_madau = lilly_madau(redshifts)
-        log_sfrd_lm = np.log10(sfrd_lilly_madau)
-
-        # Define redshifts and corresponding lookback times
-        redshift_ticks = np.array([0, 2, 4, 6, 8, 10])
-        lookback_times = cosmo.lookback_time(redshift_ticks).value
-        co_moving_distances = comoving_distance(redshift_ticks) / 1000
-
-        # Main SFRD Plot
-        plt.style.use('bmh')
-        plt.rcParams["axes.prop_cycle"] = plt.cycler("color", plt.cm.viridis(np.linspace(0, 1, 4)))
-        
-        fig, ax1 = plt.subplots(figsize=(10, 6))
-        ax2 = ax1.twiny()
-        ax3 = ax1.twiny()
-        ax3.spines['top'].set_position(('outward', 40))
-
-        # Plot data
-        ax1.errorbar(redshifts, log_sfr_uni, yerr=log_sfr_error_uni,
-                    fmt='o-', capsize=3, label=r"Uniform Prior", markersize=4)
-        ax1.errorbar(redshifts, log_sfr_norm, yerr=log_sfr_error_norm,
-                    fmt='s-', capsize=3, label=r"Normal Prior", markersize=4)
-        ax1.errorbar(redshifts, log_sfr_skew, yerr=log_sfr_error_skew,
-                    fmt='v-', capsize=3, label=r"Skew Prior", markersize=4)
-        ax1.plot(redshifts, log_sfrd_lm, 'k--', linewidth=2, label="Lilly-Madau (2014)")
-
-        # Axes configuration
-        ax1.set_xlabel("Redshift $z$")
-        ax1.set_ylabel(r"$\log_{10}\left(\text{SFRD}\ \left[\text{M}_\odot \text{yr}^{-1} \text{Mpc}^{-3}\right]\right)$")
-        ax1.set_title(f"SFRD Comparison (D = {current_D} Mpc)")
-        ax1.axvline(x=1.86, color='r', linestyle='--', alpha=0.5)
-        ax1.legend()
-        ax1.grid(True)
-        ax1.invert_xaxis()
-        # Secondary x-axis (Lookback Time)
-        ax2.set_xlabel("Lookback time [Gyr]")
-        ax2.set_xticks(redshift_ticks)
-        ax2.set_xticklabels([f"{t:.1f}" for t in lookback_times])
-
-        # Tertiary x-axis (Co-moving Distance)
-        ax3.set_xlabel("Co-moving distance [cGpc]")
-        ax3.set_xticks(redshift_ticks)
-        ax3.set_xticklabels([f"{d:.1f}" for d in co_moving_distances])
-
-        # Invert all x-axes
-        for ax in [ax1, ax2, ax3]:
-            ax.set_xlim(10, 0)
-            ax.set_xticks(redshift_ticks)
-         
-        # Invert all x-axes
-        ax1.invert_xaxis()
-        ax2.invert_xaxis()
-        ax3.invert_xaxis()
-         
-        plt.tight_layout()
-        plt.savefig(f'sfrd_plots/sfrd_comparison_D{current_D}.png', dpi=300)
-        plt.close()
-
-        # Residuals Plot
-        residuals_uni = log_sfrd_lm - log_sfr_uni
-        residuals_norm = log_sfrd_lm - log_sfr_norm
-        residuals_skew = log_sfrd_lm - log_sfr_skew
-
-        fig, ax1 = plt.subplots(figsize=(10, 6))
-        ax2 = ax1.twiny()
-        ax3 = ax1.twiny()
-        ax3.spines['top'].set_position(('outward', 40))
-
-        ax1.errorbar(redshifts, residuals_uni, yerr=log_sfr_error_uni,
-                    fmt='o-', capsize=3, label="Uniform Prior", markersize=4)
-        ax1.errorbar(redshifts, residuals_norm, yerr=log_sfr_error_norm,
-                    fmt='s-', capsize=3, label="Normal Prior", markersize=4)
-        ax1.errorbar(redshifts, residuals_skew, yerr=log_sfr_error_skew,
-                    fmt='v-', capsize=3, label="Skew Prior", markersize=4)
-        ax1.axhline(0, color='k', linestyle='--', alpha=0.7)
-
-        ax1.set_xlabel("Redshift $z$")
-        ax1.set_ylabel(r"$\Delta \log_{10}(\text{SFRD})$")
-        ax1.set_title(f"SFRD Residuals (D = {current_D} Mpc)")
-        ax1.legend()
-        ax1.grid(True)
-        ax1.invert_xaxis()
-
-        # Configure all x-axes
-        for ax in [ax1, ax2, ax3]:
-            ax.set_xlim(10, 0)
-            ax.set_xticks(redshift_ticks)
-        ax2.set_xticklabels([f"{t:.1f}" for t in lookback_times])
-        ax3.set_xticklabels([f"{d:.1f}" for d in co_moving_distances])
-        ax2.set_xlabel("Lookback time [Gyr]")
-        ax3.set_xlabel("Co-moving distance [cGpc]")
-
-        # Invert all x-axes
-        ax1.invert_xaxis()
-        ax2.invert_xaxis()
-        ax3.invert_xaxis()
-
-        plt.tight_layout()
-        plt.savefig(f'sfrd_plots/sfrd_residuals_D{current_D}.png', dpi=300)
-        plt.close()
-
-        # Ratio Plot
-        ratio_uni = sfrd_lilly_madau / total_sfr_uni
-        ratio_norm = sfrd_lilly_madau / total_sfr_norm
-        ratio_skew = sfrd_lilly_madau / total_sfr_skew
-        ratio_err_uni = ratio_error(total_sfr_uni, total_sfr_error_uni, sfrd_lilly_madau)
-        ratio_err_norm = ratio_error(total_sfr_norm, total_sfr_error_norm, sfrd_lilly_madau)
-        ratio_err_skew = ratio_error(total_sfr_skew, total_sfr_error_skew, sfrd_lilly_madau)
-
-        fig, ax1 = plt.subplots(figsize=(10, 6))
-        ax2 = ax1.twiny()
-        ax3 = ax1.twiny()
-        ax3.spines['top'].set_position(('outward', 40))
-
-        ax1.errorbar(redshifts, ratio_uni, yerr=ratio_err_uni,
-                    fmt='o-', capsize=3, label="Uniform Prior", markersize=4)
-        ax1.errorbar(redshifts, ratio_norm, yerr=ratio_err_norm,
-                    fmt='s-', capsize=3, label="Normal Prior", markersize=4)
-        ax1.errorbar(redshifts, ratio_skew, yerr=ratio_err_skew,
-                    fmt='v-', capsize=3, label="Skew Prior", markersize=4)
-        ax1.axhline(1, color='k', linestyle='--', alpha=0.7)
-
-        ax1.set_xlabel("Redshift $z$")
-        ax1.set_ylabel(r"$\frac{\text{SFRD}_{\text{LM}}}{\text{SFRD}_{\text{Data}}}$")
-        ax1.set_title(f"SFRD Ratio (D = {current_D} Mpc)")
-        ax1.legend()
-        ax1.grid(True)
-        ax1.invert_xaxis()
-
-        # Configure all x-axes
-        for ax in [ax1, ax2, ax3]:
-            ax.set_xlim(10, 0)
-            ax.set_xticks(redshift_ticks)
-        ax2.set_xticklabels([f"{t:.1f}" for t in lookback_times])
-        ax3.set_xticklabels([f"{d:.1f}" for d in co_moving_distances])
-        ax2.set_xlabel("Lookback time [Gyr]")
-        ax3.set_xlabel("Co-moving distance [cGpc]")
-
-        # Invert all x-axes
-        ax1.invert_xaxis()
-        ax2.invert_xaxis()
-        ax3.invert_xaxis()
-
-        plt.tight_layout()
-        plt.savefig(f'sfrd_plots/sfrd_ratio_D{current_D}.png', dpi=300)
-        plt.close()
-
-        # z=1.86 calculations
-        z_186 = np.array([1.86])
-        sfr_uni_186, _ = compute_total_sfr_and_error(
-            z_186, tstart_uni, sd_tstart_uni,
-            A_uni, tau_uni, V,
-            sd_A_uni, sd_tau_uni
+        log_sfr, log_sfr_error = compute_log_sfr_and_error(total_sfr, total_sfr_error)
+        results[f'log_sfr_{prior}'] = log_sfr
+        results[f'log_sfr_error_{prior}'] = log_sfr_error
+    
+    # Lilly-Madau calculations
+    sfrd_lilly_madau = lilly_madau(REDSHIFTS)
+    log_sfrd_lm = np.log10(sfrd_lilly_madau)
+    
+    # Prepare data for plotting
+    lookback_times = cosmo.lookback_time(REDSHIFT_TICKS).value
+    co_moving_distances = comoving_distance(REDSHIFT_TICKS) / 1000
+    
+    # Group data for plotting
+    log_sfr_data = {
+        'uniform': results['log_sfr_uniform'],
+        'norm': results['log_sfr_norm'],
+        'skew': results['log_sfr_skew']
+    }
+    
+    log_sfr_errors = {
+        'uniform': results['log_sfr_error_uniform'],
+        'norm': results['log_sfr_error_norm'],
+        'skew': results['log_sfr_error_skew']
+    }
+    
+    total_sfr_data = {
+        'uniform': results['total_sfr_uniform'],
+        'norm': results['total_sfr_norm'],
+        'skew': results['total_sfr_skew']
+    }
+    
+    total_sfr_errors = {
+        'uniform': results['total_sfr_error_uniform'],
+        'norm': results['total_sfr_error_norm'],
+        'skew': results['total_sfr_error_skew']
+    }
+    
+    # Create plots
+    plt.style.use('bmh')
+    plt.rcParams["axes.prop_cycle"] = plt.cycler("color", plt.cm.viridis(np.linspace(0, 1, 4)))
+    
+    # Main SFRD comparison plot
+    plot_sfrd_comparison(
+        REDSHIFTS, log_sfr_data, log_sfr_errors, log_sfrd_lm, D, 
+        lookback_times, co_moving_distances, ir, uv
+    )
+    
+    # Residuals plot
+    plot_residuals(
+        REDSHIFTS, log_sfrd_lm, log_sfr_data, log_sfr_errors, D,
+        lookback_times, co_moving_distances
+    )
+    
+    # Ratio plot
+    plot_ratio(
+        REDSHIFTS, sfrd_lilly_madau, total_sfr_data, total_sfr_errors, D,
+        lookback_times, co_moving_distances
+    )
+    
+    # Valid galaxies plot
+    plot_valid_galaxies(
+        REDSHIFTS, results['total_sfr_norm'], results['n_valid_norm'], D
+    )
+    
+    # Calculate z=1.86 values
+    z_186 = np.array([1.86])
+    sfrd_lm_186 = lilly_madau(1.86)
+    
+    # Calculate SFR at z=1.86 for each prior
+    ratios_186 = {}
+    for prior in ['uniform', 'norm', 'skew']:
+        sfr_186, _, _ = compute_total_sfr_and_error(
+            z_186, 
+            params[f'tstart_{prior}'], params[f'sd_tstart_{prior}'],
+            params[f'A_{prior}'], params[f'tau_{prior}'], V,
+            params[f'sd_A_{prior}'], params[f'sd_tau_{prior}']
         )
-        sfr_norm_186, _ = compute_total_sfr_and_error(
-            z_186, tstart_norm, sd_tstart_norm,
-            A_norm, tau_norm, V,
-            sd_A_norm, sd_tau_norm
-        )
-        sfr_skew_186, _ = compute_total_sfr_and_error(
-            z_186, tstart_skew, sd_tstart_skew,
-            A_skew, tau_skew, V,
-            sd_A_skew, sd_tau_skew
-        )
-        sfrd_lm_186 = lilly_madau(1.86)
-        
-        print(f"\nD = {current_D} Mpc results at z=1.86:")
-        print(f"Uniform Prior ratio: {sfrd_lm_186/sfr_uni_186[0]:.2f}")
-        print(f"Normal Prior ratio: {sfrd_lm_186/sfr_norm_186[0]:.2f}")
-        print(f"Skew Prior ratio: {sfrd_lm_186/sfr_skew_186[0]:.2f}")
+        ratios_186[prior] = sfrd_lm_186 / sfr_186[0]
+    
+    # Print results at z=1.86
+    print(f"\nD = {D} Mpc results at z=1.86:")
+    print(f"Uniform Prior ratio: {ratios_186['uniform']:.2f}")
+    print(f"Normal Prior ratio: {ratios_186['norm']:.2f}")
+    print(f"Skew Prior ratio: {ratios_186['skew']:.2f}")
+    
+    # Print when n_valid_galaxies is 0
+    for i, count in enumerate(results['n_valid_norm']):
+        if count == 0:
+            print(f"At redshift {REDSHIFTS[i]:.2f}, no valid galaxies (t > 0) for D = {D} Mpc.")
+            break
+    else:
+        print(f"All redshifts have valid galaxies (t > 0) for D = {D} Mpc.")
+
+
+def main():
+    """Main function to process all volumes."""
+    # Load data once at start
+    data = pd.read_csv('tables/MCMC_results_12.csv')
+    ir = pd.read_csv('tables/LM_ir.csv')
+    uv = pd.read_csv('tables/LM_uv.csv')
+    
+    # Process each diameter combination
+    for D_pair in D_VALUES:
+        for D in D_pair:
+            process_volume(D, data, ir, uv)
+
+
+if __name__ == "__main__":
+    main()
