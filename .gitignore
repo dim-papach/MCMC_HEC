@@ -3,3 +3,7 @@
 /tables/*.fits
 /HEC_*/
 .mcmc_*/
+x
+uniform
+skew
+/_targets/*
