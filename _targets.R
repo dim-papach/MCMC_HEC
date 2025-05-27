@@ -5,6 +5,11 @@ library(tarchetypes)
 
 tar_source()
 
+chains <- 6
+parallel_chains <- 6
+sample_size <- 5000
+warmup <- 2500
+
 options(tidyverse.quiet = TRUE)
 tar_option_set(
   packages = c(
@@ -13,21 +18,22 @@ tar_option_set(
   ),
   # set multiprocessing to 4 cores
 
+
   garbage_collection = TRUE,
   format = "qs"
 )
 
 # Define datasets and models
 list(
-# Dataset definitions ------------------------------------------------------
+  # Dataset definitions ------------------------------------------------------
   tar_target(
     data_files,
     c(
       "tables/Hec_10.csv",
-      "tables/Hec_11-20.csv"
-      #"tables/Hec_21-30.csv",
-      #"tables/Hec_31-40.csv",
-      #"tables/Hec_41-50.csv"
+      "tables/Hec_11-20.csv",
+      "tables/Hec_21-30.csv",
+      "tables/Hec_31-40.csv",
+      "tables/Hec_41-50.csv"
     )
   ),
 
@@ -35,10 +41,10 @@ list(
     data_names,
     c(
       "Hec_10",
-      "Hec_11-20"
-      #"Hec_21-30",
-      #"Hec_31-40",
-      #"Hec_41-50"
+      "Hec_11-20",
+      "Hec_21-30",
+      "Hec_31-40",
+      "Hec_41-50"
     )
   ),
 
@@ -57,24 +63,27 @@ list(
   # Model definitions ------------------------------------------------
   tar_target(
     model_names,
-    c("np", "uni")#, "skew")
+    c("np", "uni", "skew")
   ),
 
   tar_target(
     stan_files,
     c(
-      np = "x.stan",
-      uni = "uniform.stan"
-      #skew = "skew.stan"
+      "x.stan",
+      "uniform.stan",
+      "skew.stan"
     )
   ),
 
   tar_target(
     model_list,
+    {
+    file_times <- file.mtime(stan_files)
+
     list(
-    model = cmdstan_model(stan_files),
-    names = model_names
-    ),
+      model = cmdstan_model(stan_files),
+      names = model_names
+    )},
     pattern = map(stan_files, model_names),
   ),
 
@@ -94,14 +103,13 @@ list(
       )
 
       # Fit the model
-      chains <- 1
       init_vals <- init_function(chains, nrow(data_list$data))
       fit <- model$sample(
         data            = stan_data,
         chains          = chains,
-        parallel_chains = 6,
-        iter_sampling   = 700,
-        iter_warmup     = 300,
+        parallel_chains = parallel_chains,
+        iter_sampling   = sample_size,
+        iter_warmup     = warmup,
         init            = init_vals,
         refresh         = 100,
         max_treedepth   = 12,
@@ -131,9 +139,8 @@ list(
 
 
   # Process results --------------------------------
-  ## Configuration target --------------------------------
   tar_target(
-    summary_config,
+    write_summary,
     {
       # Verify required components exist
       stopifnot(
@@ -141,65 +148,38 @@ list(
         !is.null(fit_model$model_name)
       )
 
-      list(
-        params = c("t_sf", "tau", "A", "x", "id", "logSFR_today_pred"),
-        suffix = fit_model$model_name,
-        data_name = fit_model$data_name,
-        output_dir = here::here(fit_model$data_name, fit_model$model_name)
-      )
-    },
-    pattern = map(fit_model)
-  ),
-  # Summary data target --------------------------------
-  tar_target(
-    summary_data,
-    {
-      dir.create(summary_config$output_dir, showWarnings = FALSE, recursive = TRUE)
+      params <- c("t_sf", "tau", "A", "x", "id", "logSFR_today_pred")
+      suffix <- fit_model$model_name
+      data_name <- fit_model$data_name
 
-      # Extract the summary of the parameters
-      summary
+      output_dir <- here::here(data_name, suffix)
+      dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
-    },
-    pattern = map(summary_config)
-  ),
-
-  # Write individual parameter files --------------------------------
-  tar_target(
-    param_files,
-    {
-      purrr::map_chr(summary_config$params, function(param) {
-        filename <- file.path(
-          summary_config$output_dir,
-          paste0(param, "_", summary_config$suffix, ".csv")
-        )
-        summary_data |>
+      # Process individual parameters
+      individual_files <- purrr::map_chr(params, function(param) {
+        filename <- file.path(output_dir, paste0(param, "_", suffix, ".csv"))
+        fit_model$fit$summary(variable = param) |>
           readr::write_csv(filename)
         filename
       })
-    },
-    pattern = map(summary_config, summary_data),
-    format = "file"
-  ),
 
-  # Write combined summary file --------------------------------
-  tar_target(
-    combined_file,
-    {
-      combined <- purrr::map_dfc(summary_config$params, function(param) {
-        param_data <- summary_data |>
+      # Create combined summary with param and param_sd columns
+      combined_summary <- purrr::map_dfc(params, function(param) {
+        summary_row <- fit_model$fit$summary(variable = param)
         tibble::tibble(
-          "{param}" := param_data$mean,
-          "{param}_sd" := param_data$sd
+          "{param}_{suffix}" := summary_row$mean,
+          "{param}_sd" := summary_row$sd
         )
       })
-      filename <- file.path(
-        summary_config$output_dir,
-        paste0("combined_summary_", summary_config$suffix, ".csv")
-      )
-      readr::write_csv(combined, filename)
-      filename
+
+      # Save combined summary
+      combined_file <- file.path(output_dir, paste0("combined_summary_", suffix, ".csv"))
+      readr::write_csv(combined_summary, combined_file)
+
+      # Return all created files
+      c(individual_files, combined_file)
     },
-    pattern = map(summary_config, summary_data),
+    pattern = map(fit_model),
     format = "file"
   ),
 
