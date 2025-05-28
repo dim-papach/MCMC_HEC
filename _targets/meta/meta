@@ -1,0 +1,19 @@
+name|type|data|command|depend|seed|path|time|size|bytes|format|repository|iteration|parent|children|seconds|warnings|error
+create_file_based_histograms|function|3935d5c0f6fb9f61
+sample_size|object|664e20f2cf9d5df1
+chains|object|195dadb6d6a0c78f
+warmup|object|d887885b74fc7404
+threads_chain|object|1f35528bd840b63d
+process_hierarchical_results|function|f810a3d250f085ee
+combine_model_results|function|2767dac579da81af
+sfr_comparison_plot|function|a3babed6966cce4c
+create_hierarchical_diagnostics|function|f69212b68deea5eb
+parallel_chains|object|195dadb6d6a0c78f
+init_function|function|511e33041dd1b7a7
+mean_vs_median|function|6d74fe306e12c0d3
+check_convergence|function|62e9d78d5904c3cb
+prepare_data|function|e218d3c6c923ad98
+plot_histograms|function|2c71088183e5404a
+run_hierarchical_analysis|function|66688e8ff42667df
+hierarchical_data|stem|f72912d02960c660|7400b5a24fcc878b|2c530c1562a7fbd1|226625215||t20236.9327851953s|s2381816b|2381816|qs|local|vector|||0.153|[1m[22mOne or more parsing issues, call `problems()` on your data frame for details, e.g.:   dat <- vroom(...)   problems(dat)|
+hierarchical_model|stem||7c354b1050e41eb3|2c530c1562a7fbd1|2136892585||t20236.9327911448s||0|qs|local|vector|||0.394||An error occured during compilation! See the message above for more information.

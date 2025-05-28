@@ -1,213 +1,308 @@
-# _targets.R: multi-model, multi-dataset pipeline using explicit cross pattern
+# _targets_hierarchical.R: Hierarchical model pipeline
 
 library(targets)
 library(tarchetypes)
 
+# Source helper functions
 tar_source()
 
-chains <- 6
-parallel_chains <- 6
+# MCMC settings
+chains <- 4
+parallel_chains <- 4
 threads_chain <- 2
-sample_size <- 5000
-warmup <- 2500
+sample_size <- 2000  # Reduced for hierarchical model
+warmup <- 1000
 
 options(tidyverse.quiet = TRUE)
 tar_option_set(
   packages = c(
     "readr", "dplyr", "tidyr", "tibble", "stringr", "here",
-    "cmdstanr", "posterior", "bayesplot", "ggplot2"
+    "cmdstanr", "posterior", "bayesplot", "ggplot2", "jsonlite"
   ),
-  # set multiprocessing to 4 cores
-
-
   garbage_collection = TRUE,
   format = "qs"
 )
 
-# Define datasets and models
 list(
-  # Dataset definitions ------------------------------------------------------
+  # Load prepared data ------------------------------------------------------
   tar_target(
-    data_files,
-    c(
-      "tables/Hec_10.csv",
-      "tables/Hec_11-20.csv",
-      "tables/Hec_21-30.csv",
-      "tables/Hec_31-40.csv",
-      "tables/Hec_41-50.csv"
-    )
-  ),
-
-  tar_target(
-    data_names,
-    c(
-      "Hec_10",
-      "Hec_11-20",
-      "Hec_21-30",
-      "Hec_31-40",
-      "Hec_41-50"
-    )
-  ),
-
-  tar_target(
-    data_list,
+    hierarchical_data,
     {
-      data <- read_csv(data_files, show_col_types = FALSE)
+      # Load the prepared data from Python
+      data <- read_csv("tables/hierarchical_data.csv", show_col_types = FALSE)
+      stan_data <- fromJSON("tables/stan_data.json")
+      group_info <- read_csv("tables/hierarchical_groups.csv", show_col_types = FALSE)
+
       list(
-        data_name = data_names,
-        data = prepare_data(data)
+        data = data,
+        stan_data = stan_data,
+        group_info = group_info
       )
-    },
-    pattern = map(data_files, data_names),
+    }
   ),
 
-  # Model definitions ------------------------------------------------
+  # Compile Stan model ------------------------------------------------
   tar_target(
-    model_names,
-    c("np", "uni", "skew")
+    hierarchical_model,
+    cmdstan_model("hierarchical_delayed_tau.stan")
   ),
 
+  # Fit hierarchical model --------------------------------------------
   tar_target(
-    stan_files,
-    c(
-      "x.stan",
-      "uniform.stan",
-      "skew.stan"
-    )
-  ),
-
-  tar_target(
-    model_list,
+    hierarchical_fit,
     {
-    file_times <- file.mtime(stan_files)
+      # Initialize values for better convergence
+      init_fun <- function() {
+        list(
+          mu_t_sf_pop = 10,
+          sigma_t_sf_pop = 2,
+          mu_tau_pop = 4,
+          sigma_tau_pop = 1,
+          mu_zeta_pop = 1.3,
+          sigma_zeta_pop = 0.05,
 
-    list(
-      model = cmdstan_model(stan_files),
-      names = model_names
-    )},
-    pattern = map(stan_files, model_names),
-  ),
+          mu_t_sf_group = rep(10, hierarchical_data$stan_data$N_groups),
+          sigma_t_sf_group = rep(0.5, hierarchical_data$stan_data$N_groups),
 
+          mu_tau_group = rep(4, hierarchical_data$stan_data$N_groups),
+          sigma_tau_group = rep(0.5, hierarchical_data$stan_data$N_groups),
 
-  # Fit models to datasets ------------------------------------------
-  tar_target(
-    fit_model,
-    {
-      # Extract data and model
-      model <- model_list$model
-      # Prepare Stan data
-      stan_data <- list(
-        N = nrow(data_list$data),
-        logSFR_total = data_list$data$logSFR_total,
-        ID = data_list$data$ID,
-        M_star = data_list$data$M_total
-      )
+          mu_zeta_group = rep(1.3, hierarchical_data$stan_data$N_groups),
+          sigma_zeta_group = rep(0.01, hierarchical_data$stan_data$N_groups),
+
+          t_sf_raw = rnorm(hierarchical_data$stan_data$N, 0, 0.1),
+          tau_raw = rnorm(hierarchical_data$stan_data$N, 0, 0.1),
+          zeta_raw = rnorm(hierarchical_data$stan_data$N, 0, 0.1),
+
+          sigma_obs = 0.1
+        )
+      }
 
       # Fit the model
-      init_vals <- init_function(chains, nrow(data_list$data))
-      fit <- model$sample(
-        data            = stan_data,
-        chains          = chains,
+      fit <- hierarchical_model$sample(
+        data = hierarchical_data$stan_data,
+        chains = chains,
         parallel_chains = parallel_chains,
         threads_per_chain = threads_chain,
-        iter_sampling   = sample_size,
-        iter_warmup     = warmup,
-        init            = init_vals,
-        refresh         = 100,
-        max_treedepth   = 12,
+        iter_sampling = sample_size,
+        iter_warmup = warmup,
+        init = init_fun,
+        refresh = 100,
+        max_treedepth = 12,
+        adapt_delta = 0.95  # Higher for hierarchical models
       )
 
-      # Return fit object
-      list(
-        fit = fit,
-        data_name = data_list$data_name,
-        parameters = fit$draws(),
-        model_name = model_list$names
-      )
-    },
-    pattern = cross(data_list, model_list),
+      fit
+    }
   ),
 
-
-  # Process results --------------------------------
+  # Extract and save results ------------------------------------------
   tar_target(
-    write_summary,
+    hierarchical_results,
     {
-      # Verify required components exist
-      stopifnot(
-        !is.null(fit_model$data_name),
-        !is.null(fit_model$model_name)
-      )
-
-      params <- c("t_sf", "tau", "A", "x", "id", "logSFR_today_pred")
-      suffix <- fit_model$model_name
-      data_name <- fit_model$data_name
-
-      output_dir <- here::here(data_name, suffix)
+      # Create output directory
+      output_dir <- here::here("hierarchical_results")
       dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
-      # Process individual parameters
-      individual_files <- purrr::map_chr(params, function(param) {
-        filename <- file.path(output_dir, paste0(param, "_", suffix, ".csv"))
-        fit_model$fit$summary(variable = param) |>
-          readr::write_csv(filename)
-        filename
-      })
+      # Extract galaxy-level parameters
+      galaxy_params <- c("t_sf", "tau", "zeta", "x", "A", "logSFR_today_pred")
+      galaxy_summary <- hierarchical_fit$summary(variables = galaxy_params)
 
-      # Create combined summary with param and param_sd columns
-      combined_summary <- purrr::map_dfc(params, function(param) {
-        summary_row <- fit_model$fit$summary(variable = param)
-        tibble::tibble(
-          "{param}_{suffix}" := summary_row$mean,
-          "{param}_sd_{suffix}" := summary_row$sd
+      # Add galaxy IDs and merge with original data
+      galaxy_summary$ID <- rep(hierarchical_data$stan_data$ID,
+                               each = length(galaxy_params))
+      galaxy_summary$parameter <- rep(galaxy_params,
+                                      times = hierarchical_data$stan_data$N)
+
+      # Reshape to wide format
+      galaxy_wide <- galaxy_summary %>%
+        select(ID, parameter, mean, sd, q5, q95, rhat, ess_bulk) %>%
+        pivot_wider(
+          names_from = parameter,
+          values_from = c(mean, sd, q5, q95, rhat, ess_bulk),
+          names_sep = "_"
         )
-      })
 
-      # Save combined summary
-      combined_file <- file.path(output_dir, "combined_summary_{suffix}.csv")
-      readr::write_csv(combined_summary, combined_file)
+      # Merge with original data
+      galaxy_results <- hierarchical_data$data %>%
+        left_join(galaxy_wide, by = c("ID" = "ID"))
 
-      # Return all created files
-      c(individual_files, combined_file)
+      write_csv(galaxy_results, file.path(output_dir, "galaxy_parameters.csv"))
+
+      # Extract group-level parameters
+      group_params <- c("mu_t_sf_group", "mu_tau_group", "mu_zeta_group",
+                        "sigma_t_sf_group", "sigma_tau_group", "sigma_zeta_group",
+                        "mean_x_group", "mean_sSFR_group")
+
+      group_summary <- hierarchical_fit$summary(variables = group_params)
+
+      # Reshape group results
+      group_wide <- group_summary %>%
+        mutate(
+          group_id = as.integer(str_extract(variable, "\\[(\\d+)\\]") %>%
+                                  str_extract("\\d+")),
+          param_name = str_remove(variable, "\\[\\d+\\]")
+        ) %>%
+        select(group_id, param_name, mean, sd, q5, q95, rhat, ess_bulk) %>%
+        pivot_wider(
+          names_from = param_name,
+          values_from = c(mean, sd, q5, q95, rhat, ess_bulk),
+          names_sep = "_"
+        )
+
+      # Merge with group info
+      group_results <- hierarchical_data$group_info %>%
+        left_join(group_wide, by = "group_id")
+
+      write_csv(group_results, file.path(output_dir, "group_parameters.csv"))
+
+      # Extract population-level parameters
+      pop_params <- c("mu_t_sf_pop", "sigma_t_sf_pop",
+                      "mu_tau_pop", "sigma_tau_pop",
+                      "mu_zeta_pop", "sigma_zeta_pop", "sigma_obs")
+
+      pop_summary <- hierarchical_fit$summary(variables = pop_params)
+      write_csv(pop_summary, file.path(output_dir, "population_parameters.csv"))
+
+      # Save full posterior draws for selected parameters
+      draws <- hierarchical_fit$draws(variables = c(pop_params, "lp__"))
+      write_rds(draws, file.path(output_dir, "posterior_draws.rds"))
+
+      list(
+        galaxy_results = galaxy_results,
+        group_results = group_results,
+        pop_summary = pop_summary,
+        output_dir = output_dir
+      )
+    }
+  ),
+
+  # Diagnostics -------------------------------------------------------
+  tar_target(
+    hierarchical_diagnostics,
+    {
+      output_dir <- hierarchical_results$output_dir
+
+      # MCMC diagnostics
+      diag_summary <- hierarchical_fit$diagnostic_summary()
+      capture.output(diag_summary,
+                     file = file.path(output_dir, "diagnostic_summary.txt"))
+
+      # Sampler diagnostics
+      sampler_diag <- hierarchical_fit$sampler_diagnostics()
+      write_csv(as.data.frame(sampler_diag),
+                file.path(output_dir, "sampler_diagnostics.csv"))
+
+      # Create diagnostic plots
+      pdf(file.path(output_dir, "diagnostic_plots.pdf"), width = 10, height = 8)
+
+      # Trace plots for population parameters
+      pop_draws <- hierarchical_fit$draws(
+        variables = c("mu_t_sf_pop", "mu_tau_pop", "mu_zeta_pop", "sigma_obs")
+      )
+      print(mcmc_trace(pop_draws))
+
+      # Rank plots
+      print(mcmc_rank_overlay(pop_draws))
+
+      # Energy diagnostic
+      print(mcmc_nuts_energy(sampler_diag))
+
+      dev.off()
+
+      file.path(output_dir, "diagnostic_plots.pdf")
     },
-    pattern = map(fit_model),
     format = "file"
   ),
 
-
-  # Diagnostics --------------------------------
+  # Create analysis plots ---------------------------------------------
   tar_target(
-    diagnostic_checks,
+    hierarchical_plots,
     {
-      # Verify required components exist
-      stopifnot(
-        !is.null(fit_model$data_name),
-        !is.null(fit_model$model_name)
-      )
+      output_dir <- hierarchical_results$output_dir
 
-      # Create output directory
-      output_dir <- here::here(fit_model$data_name, fit_model$model_name)
-      dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+      # Load results
+      galaxy_res <- hierarchical_results$galaxy_results
+      group_res <- hierarchical_results$group_results
 
-      # Process and save sampler diagnostics
-      diagnostics_file <- file.path(output_dir,
-                                    paste0("diagnostics_", fit_model$model_name, ".csv"))
-      fit_model$fit$sampler_diagnostics() %>%
-        as.data.frame() %>%
-        readr::write_csv(diagnostics_file)
+      # Create comprehensive plot set
+      pdf(file.path(output_dir, "analysis_plots.pdf"), width = 12, height = 10)
 
-      # Process and save diagnostic summary
-      summary_file <- file.path(output_dir,
-                                paste0("summary_", fit_model$model_name, ".txt"))
-      capture.output(
-        fit_model$fit$diagnostic_summary(),
-        file = summary_file
-      )
+      # 1. Parameter distributions by group
+      p1 <- galaxy_res %>%
+        filter(!is.na(mean_t_sf)) %>%
+        ggplot(aes(x = factor(group_id), y = mean_t_sf)) +
+        geom_boxplot(aes(fill = Activity_class)) +
+        theme_minimal() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        labs(title = "Formation Time Distribution by Group",
+             x = "Group ID", y = "Formation Time (Gyr)")
+      print(p1)
 
-      # Return both file paths
-      c(diagnostics_file, summary_file)
+      # 2. Group-level parameter relationships
+      p2 <- group_res %>%
+        filter(n_galaxies > 10) %>%  # Only well-populated groups
+        ggplot(aes(x = mean_mu_tau_group, y = mean_mu_t_sf_group)) +
+        geom_point(aes(size = n_galaxies, color = mean_mean_sSFR_group)) +
+        geom_errorbar(aes(ymin = mean_mu_t_sf_group - sd_mu_t_sf_group,
+                          ymax = mean_mu_t_sf_group + sd_mu_t_sf_group),
+                      alpha = 0.3) +
+        geom_errorbarh(aes(xmin = mean_mu_tau_group - sd_mu_tau_group,
+                           xmax = mean_mu_tau_group + sd_mu_tau_group),
+                       alpha = 0.3) +
+        scale_color_viridis_c(name = "Mean sSFR") +
+        theme_minimal() +
+        labs(title = "Group Parameter Relationships",
+             x = "Mean τ (Gyr)", y = "Mean Formation Time (Gyr)",
+             size = "N Galaxies")
+      print(p2)
+
+      # 3. Observed vs Predicted SFR
+      p3 <- galaxy_res %>%
+        filter(!is.na(mean_logSFR_today_pred)) %>%
+        ggplot(aes(x = logSFR_HECv2, y = mean_logSFR_today_pred)) +
+        geom_point(alpha = 0.5, size = 0.5) +
+        geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+        facet_wrap(~Activity_class, labeller = labeller(
+          Activity_class = c("0" = "Star-forming", "1" = "AGN",
+                             "2" = "LINER", "3" = "Composite", "4" = "Passive")
+        )) +
+        theme_minimal() +
+        labs(title = "Observed vs Predicted log(SFR) by Activity Class",
+             x = "Observed log(SFR)", y = "Predicted log(SFR)")
+      print(p3)
+
+      # 4. Parameter evolution with mass
+      p4 <- galaxy_res %>%
+        filter(!is.na(mean_x)) %>%
+        ggplot(aes(x = logM_star_HECv2, y = mean_x)) +
+        geom_point(aes(color = ms_group), alpha = 0.5, size = 0.5) +
+        geom_smooth(method = "loess", se = TRUE) +
+        scale_color_brewer(palette = "Set1", name = "MS Group") +
+        theme_minimal() +
+        labs(title = "x = t_sf/τ vs Stellar Mass",
+             x = "log(M*)", y = "x = t_sf/τ")
+      print(p4)
+
+      # 5. Group hierarchy visualization
+      if (nrow(group_res) <= 50) {  # Only if not too many groups
+        p5 <- group_res %>%
+          arrange(desc(n_galaxies)) %>%
+          head(30) %>%
+          ggplot(aes(x = reorder(group_name, n_galaxies), y = n_galaxies)) +
+          geom_bar(stat = "identity", aes(fill = mean_mean_x_group)) +
+          coord_flip() +
+          scale_fill_viridis_c(name = "Mean x") +
+          theme_minimal() +
+          labs(title = "Top 30 Groups by Galaxy Count",
+               x = "Group", y = "Number of Galaxies")
+        print(p5)
+      }
+
+      dev.off()
+
+      file.path(output_dir, "analysis_plots.pdf")
     },
-    pattern = map(fit_model),
     format = "file"
   )
 )
