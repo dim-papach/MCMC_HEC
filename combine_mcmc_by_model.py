@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Combine MCMC results by model name.
-Stack datasets for each model into tables/{model_name}_summary.csv
-Then join all models into a single comprehensive results file.
+Modified MCMC Results Combiner
+First combines results with original HECATE data per folder,
+then filters based on |logSFR_total - logSFR_today_pred_*| < 1,
+and finally combines everything together.
 """
 
 import pandas as pd
@@ -11,11 +12,39 @@ import os
 import glob
 from pathlib import Path
 import re
+import sys
 
 def find_combined_summary_files(base_dir="."):
     """Find all combined_summary_*.csv files in the directory structure."""
-    pattern = os.path.join(base_dir, "**/combined_summary_*.csv")
-    files = glob.glob(pattern, recursive=True)
+    print(f"Searching for files in: {os.path.abspath(base_dir)}")
+    
+    # Try multiple search patterns
+    patterns = [
+        os.path.join(base_dir, "**/combined_summary_*.csv"),
+        os.path.join(base_dir, "*/*/combined_summary_*.csv"),
+        os.path.join(base_dir, "Hec_*/*/combined_summary_*.csv"),
+    ]
+    
+    files = []
+    for pattern in patterns:
+        found = glob.glob(pattern, recursive=True)
+        files.extend(found)
+        if found:
+            print(f"  Pattern '{pattern}' found {len(found)} files")
+    
+    # Remove duplicates
+    files = list(set(files))
+    
+    # Also try os.walk as fallback
+    if not files:
+        print("  Trying os.walk method...")
+        for root, dirs, filenames in os.walk(base_dir):
+            for filename in filenames:
+                if filename.startswith('combined_summary_') and filename.endswith('.csv'):
+                    filepath = os.path.join(root, filename)
+                    files.append(filepath)
+                    print(f"    Found: {filepath}")
+    
     return files
 
 def extract_model_and_dataset(filepath):
@@ -23,304 +52,383 @@ def extract_model_and_dataset(filepath):
     # Example path: "Hec_10/np/combined_summary_np.csv"
     path_parts = Path(filepath).parts
     
+    print(f"  Extracting from path: {filepath}")
+    print(f"  Path parts: {path_parts}")
+    
     # Get dataset (parent directory of parent directory)
-    dataset = path_parts[-3] if len(path_parts) >= 3 else "unknown"
+    dataset = None
+    for i, part in enumerate(path_parts):
+        if part.startswith('Hec_'):
+            dataset = part
+            break
+    
+    if dataset is None:
+        dataset = path_parts[-3] if len(path_parts) >= 3 else "unknown"
     
     # Get model name from filename
     filename = Path(filepath).stem  # "combined_summary_np"
     model_match = re.search(r'combined_summary_(.+)', filename)
     model = model_match.group(1) if model_match else "unknown"
     
+    print(f"  Dataset: {dataset}, Model: {model}")
+    
     return model, dataset
 
-def combine_files_by_model(files, output_dir="tables"):
-    """Combine files by model, stacking datasets one under the other."""
-    
-    # Create output directory
-    Path(output_dir).mkdir(exist_ok=True)
-    
-    # Group files by model
-    model_files = {}
-    
-    for filepath in files:
-        model, dataset = extract_model_and_dataset(filepath)
-        
-        if model not in model_files:
-            model_files[model] = []
-        
-        model_files[model].append({
-            'filepath': filepath,
-            'dataset': dataset
-        })
-    
-    created_files = []
-    
-    # Process each model
-    for model, file_info_list in model_files.items():
-        print(f"\nProcessing model: {model}")
-        
-        # Read and stack all datasets for this model
-        model_data_list = []
-        
-        for file_info in file_info_list:
-            filepath = file_info['filepath']
-            dataset = file_info['dataset']
-            
-            try:
-                # Read the CSV file
-                df = pd.read_csv(filepath)
-                
-                # Add metadata columns
-                df['dataset'] = dataset
-                df['source_file'] = os.path.basename(filepath)
-                
-                model_data_list.append(df)
-                print(f"  Added {filepath}: {len(df)} rows from dataset {dataset}")
-                
-            except Exception as e:
-                print(f"  Warning: Could not read {filepath}: {e}")
-                continue
-        
-        if not model_data_list:
-            print(f"  No valid files found for model {model}")
-            continue
-        
-        # Stack all datasets for this model
-        stacked_data = pd.concat(model_data_list, ignore_index=True)
-        
-        # Define output file
-        output_file = os.path.join(output_dir, f"{model}_summary.csv")
-        
-        # Save the combined data (overwrite existing)
-        stacked_data.to_csv(output_file, index=False)
-        created_files.append(output_file)
-        
-        print(f"  Created {output_file}: {len(stacked_data)} total rows from {len(file_info_list)} datasets")
-    
-    return created_files
-
-def join_all_the_files(output_dir="tables"):
+def combine_with_original_and_filter(mcmc_file, model_name, dataset_name, output_dir, original_df):
     """
-    Join all model summary files into a single comprehensive results file.
-    Merges on the id_{model} columns to combine results from different models.
+    Combine MCMC results with original HECATE data and apply filtering.
+    Returns the filtered dataframe.
     """
-    models = ["np", "uni", "skew"]
-    combined_data = None
-    
-    print("\nJoining all model files...")
-    
-    for i, model in enumerate(models):
-        file_path = os.path.join(output_dir, f"{model}_summary.csv")
+    try:
+        # Read MCMC file
+        print(f"\n  Reading MCMC file: {mcmc_file}")
+        mcmc_df = pd.read_csv(mcmc_file)
         
-        if not os.path.exists(file_path):
-            print(f"Warning: {file_path} does not exist. Skipping model {model}.")
-            continue
+        print(f"  Combining {dataset_name}/{model_name}:")
+        print(f"    MCMC data: {len(mcmc_df)} rows, {len(mcmc_df.columns)} columns")
+        print(f"    Original data: {len(original_df)} rows (from Hec_50.csv)")
         
-        try:
-            df = pd.read_csv(file_path)
-            print(f"Reading {file_path}: {len(df)} rows, {len(df.columns)} columns")
-            
-            if combined_data is None:
-                # First model - use as base
-                combined_data = df.copy()
-                print(f"  Using {model} as base dataframe")
+        # Debug: show first few columns of each dataframe
+        print(f"    MCMC columns (first 10): {list(mcmc_df.columns[:10])}")
+        print(f"    Original columns (first 10): {list(original_df.columns[:10])}")
+        
+        # Find the id column in MCMC results
+        id_col_mcmc = f'id_{model_name}'
+        if id_col_mcmc not in mcmc_df.columns:
+            # Try without model suffix
+            if 'id' in mcmc_df.columns:
+                id_col_mcmc = 'id'
+            elif 'id_np' in mcmc_df.columns and model_name == 'np':
+                id_col_mcmc = 'id_np'
+            elif 'id_uni' in mcmc_df.columns and model_name == 'uni':
+                id_col_mcmc = 'id_uni'
+            elif 'id_skew' in mcmc_df.columns and model_name == 'skew':
+                id_col_mcmc = 'id_skew'
             else:
-                # Subsequent models - join on id columns
-                
-                # Identify the id column for current model
-                id_col_current = f"id_{model}"
-                
-                # Find the id column in the base dataframe (should be from first model)
-                base_id_cols = [col for col in combined_data.columns if col.startswith('id_')]
-                if not base_id_cols:
-                    print(f"Warning: No id column found in base dataframe")
-                    continue
-                
-                base_id_col = base_id_cols[0]  # Use the first id column found
-                
-                # Check if both id columns exist
-                if id_col_current not in df.columns:
-                    print(f"Warning: {id_col_current} not found in {file_path}")
-                    continue
-                
-                if base_id_col not in combined_data.columns:
-                    print(f"Warning: {base_id_col} not found in combined dataframe")
-                    continue
-                
-                # Perform the join
-                print(f"  Joining on {base_id_col} = {id_col_current}")
-                
-                # Use outer join to keep all records from both dataframes
-                combined_data = pd.merge(
-                    combined_data, 
-                    df, 
-                    left_on=base_id_col, 
-                    right_on=id_col_current, 
-                    how='outer',
-                    suffixes=('', f'_{model}')
-                )
-                
-                print(f"  After joining {model}: {len(combined_data)} rows, {len(combined_data.columns)} columns")
-                
-        except Exception as e:
-            print(f"Error reading {file_path}: {e}")
-            continue
+                print(f"    Warning: No id column found in MCMC results")
+                print(f"    Available columns: {[col for col in mcmc_df.columns if 'id' in col.lower()]}")
+                return None
+        
+        print(f"    Using MCMC id column: {id_col_mcmc}")
+        
+        # Check for ID in original
+        if 'ID' not in original_df.columns:
+            print(f"    Warning: No ID column in original file")
+            print(f"    Available columns: {[col for col in original_df.columns if 'id' in col.lower()]}")
+            return None
+        
+        # Convert id columns to same type (int)
+        try:
+            mcmc_df[id_col_mcmc] = mcmc_df[id_col_mcmc].astype(int)
+            original_df['ID'] = original_df['ID'].astype(int)
+        except:
+            print(f"    Warning: Could not convert ID columns to int")
+        
+        # Perform outer join
+        print(f"    Merging on original['ID'] == mcmc['{id_col_mcmc}']")
+        merged_df = pd.merge(
+            original_df,
+            mcmc_df,
+            left_on='ID',
+            right_on=id_col_mcmc,
+            how='outer',
+            suffixes=('', f'_{model_name}_mcmc')
+        )
+        
+        print(f"    After merge: {len(merged_df)} rows")
+        
+        # Apply filtering: |logSFR_total - logSFR_today_pred_*| < 1
+        logSFR_pred_col = f'logSFR_today_pred_{model_name}'
+        
+        # Debug: check if columns exist
+        print(f"    Looking for columns: 'logSFR_total' and '{logSFR_pred_col}'")
+        
+        if 'logSFR_total' in merged_df.columns and logSFR_pred_col in merged_df.columns:
+            # Calculate difference
+            diff = np.abs(merged_df['logSFR_total'] - merged_df[logSFR_pred_col])
+            
+            # Count rows before filtering
+            valid_before = merged_df[logSFR_pred_col].notna().sum()
+            
+            # Set values to NaN where difference >= 1
+            mask_invalid = (diff >= 1) | diff.isna()
+            merged_df.loc[mask_invalid, logSFR_pred_col] = np.nan
+            
+            # Also set related columns to NaN for consistency
+            related_cols = [col for col in merged_df.columns if 
+                          col.startswith(f't_sf_{model_name}') or 
+                          col.startswith(f'tau_{model_name}') or 
+                          col.startswith(f'A_{model_name}') or 
+                          col.startswith(f'x_{model_name}') or
+                          col.startswith(f'logSFR_today_pred_sd_{model_name}')]
+            
+            print(f"    Related columns to filter: {related_cols}")
+            
+            for col in related_cols:
+                if col in merged_df.columns:
+                    merged_df.loc[mask_invalid, col] = np.nan
+            
+            # Count rows after filtering
+            valid_after = merged_df[logSFR_pred_col].notna().sum()
+            
+            print(f"    Filtering results:")
+            print(f"      Valid before: {valid_before}")
+            print(f"      Valid after: {valid_after}")
+            print(f"      Removed: {valid_before - valid_after}")
+        else:
+            print(f"    Warning: Cannot apply filtering - missing required columns")
+            if 'logSFR_total' not in merged_df.columns:
+                print(f"      Missing: logSFR_total")
+            if logSFR_pred_col not in merged_df.columns:
+                print(f"      Missing: {logSFR_pred_col}")
+                print(f"      Available logSFR columns: {[col for col in merged_df.columns if 'logSFR' in col]}")
+        
+        # Add metadata
+        merged_df['dataset'] = dataset_name
+        merged_df['model'] = model_name
+        
+        # Save intermediate result
+        output_file = os.path.join(output_dir, f"{dataset_name}_{model_name}_filtered.csv")
+        merged_df.to_csv(output_file, index=False)
+        print(f"    Saved to: {output_file}")
+        
+        return merged_df
+        
+    except Exception as e:
+        print(f"    Error processing {mcmc_file}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def combine_all_filtered_results(filtered_dir, output_file):
+    """
+    Combine all filtered results into a single file.
+    """
+    # Find all filtered files
+    pattern = os.path.join(filtered_dir, "*_filtered.csv")
+    filtered_files = glob.glob(pattern)
     
-    if combined_data is None:
-        print("Error: No valid model files found to combine!")
+    if not filtered_files:
+        print("No filtered files found!")
         return None
     
-    # Save the final combined results
-    output_file = os.path.join(output_dir, "MCMC_results_combined.csv")
-    combined_data.to_csv(output_file, index=False)
+    print(f"\nCombining {len(filtered_files)} filtered files...")
     
+    # Group files by dataset to avoid duplicates
+    dataset_files = {}
+    for file in sorted(filtered_files):
+        # Extract dataset name from filename (e.g., "Hec_10_np_filtered.csv" -> "Hec_10")
+        basename = os.path.basename(file)
+        parts = basename.split('_')
+        if len(parts) >= 2 and parts[0] == 'Hec':
+            dataset = parts[0] + '_' + parts[1]
+        else:
+            dataset = 'unknown'
+        
+        if dataset not in dataset_files:
+            dataset_files[dataset] = []
+        dataset_files[dataset].append(file)
+    
+    print(f"  Found datasets: {list(dataset_files.keys())}")
+    
+    # For each dataset, combine all models
+    combined_datasets = []
+    
+    for dataset, files in dataset_files.items():
+        if len(files) == 1:
+            # Only one model for this dataset
+            df = pd.read_csv(files[0])
+            combined_datasets.append(df)
+            print(f"  {dataset}: {len(df)} rows (1 model)")
+        else:
+            # Multiple models for this dataset - need to merge
+            print(f"  {dataset}: merging {len(files)} models")
+            
+            # Start with the first file
+            base_df = pd.read_csv(files[0])
+            
+            # Merge with other models
+            for file in files[1:]:
+                model_df = pd.read_csv(file)
+                
+                # Extract model name from filename
+                basename = os.path.basename(file)
+                parts = basename.replace('_filtered.csv', '').split('_')
+                if len(parts) >= 3:
+                    model_name = parts[2]
+                else:
+                    model_name = 'unknown'
+                
+                print(f"    Merging model: {model_name}")
+                
+                # Drop duplicate columns except for model-specific ones
+                cols_to_keep = ['ID'] + [col for col in model_df.columns 
+                                       if model_name in col or col not in base_df.columns]
+                model_df = model_df[cols_to_keep]
+                
+                # Merge on ID
+                base_df = pd.merge(base_df, model_df, on='ID', how='outer', 
+                                 suffixes=('', f'_{model_name}_dup'))
+            
+            combined_datasets.append(base_df)
+            print(f"    Combined: {len(base_df)} rows")
+    
+    # Combine all datasets
+    if not combined_datasets:
+        print("No valid data to combine!")
+        return None
+    
+    combined_df = pd.concat(combined_datasets, ignore_index=True)
+    
+    print(f"\nCombined result: {len(combined_df)} total rows")
+    
+    # Remove duplicate rows based on ID if present
+    if 'ID' in combined_df.columns:
+        before_dedup = len(combined_df)
+        combined_df = combined_df.drop_duplicates(subset=['ID'], keep='first')
+        after_dedup = len(combined_df)
+        if before_dedup != after_dedup:
+            print(f"Removed {before_dedup - after_dedup} duplicate rows")
+    
+    # Sort by ID for consistency
+    if 'ID' in combined_df.columns:
+        combined_df = combined_df.sort_values('ID').reset_index(drop=True)
+    
+    # Save final result
+    combined_df.to_csv(output_file, index=False)
     print(f"\nFinal combined results saved to: {output_file}")
-    print(f"Final dataframe: {len(combined_data)} rows, {len(combined_data.columns)} columns")
+    print(f"Final shape: {combined_df.shape}")
     
-    # Print column summary for verification
-    print("\nColumn summary:")
-    for col in sorted(combined_data.columns):
-        print(f"  {col}")
-    
-    return output_file
+    return combined_df
 
-def verify_results(output_file):
+def create_summary_statistics(final_df, output_dir):
     """
-    Verify the combined results and provide a summary.
+    Create summary statistics for the final combined dataset.
     """
-    if not os.path.exists(output_file):
-        print(f"Output file {output_file} does not exist!")
-        return
+    summary_file = os.path.join(output_dir, "summary_statistics.txt")
     
-    try:
-        df = pd.read_csv(output_file)
-        print(f"\n=== VERIFICATION SUMMARY ===")
-        print(f"Total rows: {len(df)}")
-        print(f"Total columns: {len(df.columns)}")
+    with open(summary_file, 'w') as f:
+        f.write("=== MCMC RESULTS SUMMARY STATISTICS ===\n\n")
         
-        # Check for missing data
-        missing_summary = df.isnull().sum()
-        print(f"\nMissing data summary:")
-        for col, missing_count in missing_summary[missing_summary > 0].items():
-            print(f"  {col}: {missing_count} missing ({missing_count/len(df)*100:.1f}%)")
+        f.write(f"Total rows: {len(final_df)}\n")
+        f.write(f"Total columns: {len(final_df.columns)}\n\n")
         
-        # Check for ID columns
-        id_cols = [col for col in df.columns if col.startswith('id_')]
-        print(f"\nID columns found: {id_cols}")
-        
-        # Check datasets
-        if 'dataset' in df.columns:
-            dataset_counts = df['dataset'].value_counts()
-            print(f"\nDataset distribution:")
+        # Dataset distribution
+        if 'dataset' in final_df.columns:
+            f.write("Dataset distribution:\n")
+            dataset_counts = final_df['dataset'].value_counts()
             for dataset, count in dataset_counts.items():
-                print(f"  {dataset}: {count} rows")
+                f.write(f"  {dataset}: {count} rows\n")
+            f.write("\n")
         
-    except Exception as e:
-        print(f"Error verifying results: {e}")
+        # Model coverage
+        if 'model' in final_df.columns:
+            f.write("Model distribution:\n")
+            model_counts = final_df['model'].value_counts()
+            for model, count in model_counts.items():
+                f.write(f"  {model}: {count} rows\n")
+            f.write("\n")
         
+        # Valid predictions per model
+        f.write("Valid predictions per model:\n")
+        for model in ['np', 'uni', 'skew']:
+            logSFR_col = f'logSFR_today_pred_{model}'
+            if logSFR_col in final_df.columns:
+                valid_count = final_df[logSFR_col].notna().sum()
+                f.write(f"  {model}: {valid_count} valid predictions\n")
+        f.write("\n")
         
-def combine_with_original():
-    """
-    Combine the original HECATE with the combined summary files.
-    """
-    original_file = "tables/Hec_50.csv"
-    combined_file = "tables/MCMC_results_combined.csv"
-    output_file = "tables/HEC_50_combined.csv"
+        # Missing data summary
+        f.write("Columns with most missing data:\n")
+        missing_counts = final_df.isnull().sum().sort_values(ascending=False).head(20)
+        for col, count in missing_counts.items():
+            if count > 0:
+                pct = (count / len(final_df)) * 100
+                f.write(f"  {col}: {count} missing ({pct:.1f}%)\n")
     
-    if not os.path.exists(original_file):
-        print(f"Original file {original_file} does not exist!")
-        return
-    if not os.path.exists(combined_file):
-        print(f"Combined file {combined_file} does not exist!")
-        return
-    try:
-        original_df = pd.read_csv(original_file)
-        combined_df = pd.read_csv(combined_file)
-        
-        # Merge on id columns
-        id_cols = [col for col in combined_df.columns if col.startswith('id_')]
-        if not id_cols:
-            print("No ID columns found in combined file!")
-            return
-        id_col = id_cols[0]  # Use the first ID column found
-        
-        # Merge original on id column original['ID']
-        original_df.rename(columns={'ID': id_col}, inplace=True)
-        final_df = pd.merge(original_df, combined_df, on=id_col, how='outer', suffixes=('', '_combined'))
-        
-        # Save the final combined results
-        final_df.to_csv(output_file, index=False)
-        print(f"Combined original and MCMC results saved to: {output_file}")
-        
-        # check if |logSFR_total- logSFR_today_pred_{model}| < 0.1
-        if 'logSFR_total' in final_df.columns:
-            for model in ['np', 'uni', 'skew']:
-                log_col = f"logSFR_today_pred_{model}"
-                if log_col in final_df.columns:
-                    diff_col = f"logSFR_diff_{model}"
-                    final_df[diff_col] = np.abs(final_df['logSFR_total'] - final_df[log_col])
-                    print(f"  Added difference column {diff_col} for model {model}")
-                    # Check if the difference is within the threshold
-                    within_threshold = final_df[diff_col] < 0.1
-                    print(f"  {model}: {within_threshold.sum()} rows within threshold (|logSFR_total - logSFR_today_pred_{model}| < 0.1)")
-                    # if over threshold, make them NaN
-                    final_df.loc[~within_threshold, log_col] = np.nan
-                    
-        else:            
-            print("Warning: logSFR_total column not found in original file!")
-        # Save the final combined results
-        final_df.to_csv(output_file, index=False)
-        print(f"Final combined results saved to: {output_file}")
-        
-        
-    except Exception as e:
-        print(f"Error combining original and MCMC results: {e}")
-        return
+    print(f"Summary statistics saved to: {summary_file}")
 
 def main():
     """Main function to combine MCMC results."""
-    print("=== MCMC Results Combiner ===")
-    print("Finding MCMC combined summary files...")
+    print("=== Modified MCMC Results Combiner ===")
+    print(f"Current working directory: {os.getcwd()}")
+    print("Using Hec_50.csv as the source for all original HECATE data\n")
+    
+    # Load the original HECATE data once
+    original_file = "tables/Hec_50.csv"
+    
+    # Also check alternative location
+    if not os.path.exists(original_file):
+        original_file = "Hec_50.csv"
+    
+    if not os.path.exists(original_file):
+        print(f"Error: Original HECATE file not found!")
+        print(f"Looked for: 'tables/Hec_50.csv' and 'Hec_50.csv'")
+        print(f"Please ensure the file exists in one of these locations.")
+        return
+    
+    try:
+        print(f"Loading original HECATE data from: {original_file}")
+        original_df = pd.read_csv(original_file)
+        print(f"Loaded original HECATE data: {len(original_df)} rows, {len(original_df.columns)} columns\n")
+    except Exception as e:
+        print(f"Error loading original HECATE data: {e}")
+        return
     
     # Find all combined_summary files
+    print("Finding MCMC combined summary files...")
     files = find_combined_summary_files()
     
     if not files:
-        print("No combined_summary_*.csv files found!")
+        print("\nNo combined_summary_*.csv files found!")
+        print("Please check that:")
+        print("1. You are in the correct directory")
+        print("2. The MCMC results have been generated")
+        print("3. The files follow the pattern 'combined_summary_*.csv'")
         return
     
-    print(f"Found {len(files)} files:")
-    for f in files:
+    print(f"\nFound {len(files)} files:")
+    for f in sorted(files):
         print(f"  {f}")
     
-    # Combine files by model
-    print("\n=== STEP 1: Combining files by model ===")
-    created_files = combine_files_by_model(files)
+    # Create output directories
+    filtered_dir = "tables/filtered_results"
+    os.makedirs(filtered_dir, exist_ok=True)
+    os.makedirs("tables", exist_ok=True)
     
-    if not created_files:
-        print("No model summary files were created!")
+    # Process each file: combine with original and filter
+    print("\n=== STEP 1: Combining with original and filtering ===")
+    processed_count = 0
+    
+    for filepath in sorted(files):
+        model, dataset = extract_model_and_dataset(filepath)
+        result_df = combine_with_original_and_filter(
+            filepath, model, dataset, filtered_dir, original_df
+        )
+        if result_df is not None:
+            processed_count += 1
+    
+    if processed_count == 0:
+        print("\nNo files were successfully processed!")
         return
     
-    print(f"\nSuccessfully created {len(created_files)} model summary files:")
-    for f in created_files:
-        print(f"  {f}")
+    print(f"\nSuccessfully processed {processed_count} files")
     
-    # Join all model files
-    print("\n=== STEP 2: Joining all models ===")
-    final_output = join_all_the_files()
+    # Combine all filtered results
+    print("\n=== STEP 2: Combining all filtered results ===")
+    final_output = os.path.join("tables", "MCMC_results_combined_filtered.csv")
+    final_df = combine_all_filtered_results(filtered_dir, final_output)
     
-    if final_output:
-        print("\n=== STEP 3: Verification ===")
-        verify_results(final_output)
+    if final_df is not None:
+        # Create summary statistics
+        print("\n=== STEP 3: Creating summary statistics ===")
+        create_summary_statistics(final_df, "tables")
+        
         print(f"\n=== COMPLETED SUCCESSFULLY ===")
         print(f"Final combined file: {final_output}")
+        print(f"Summary statistics: tables/summary_statistics.txt")
     else:
         print("Failed to create final combined file!")
-        
-    # Combine with original HECATE results
-    print("\n=== STEP 4: Combining with original HECATE results ===")
-    combine_with_original()
-    print("Original HECATE results combined with MCMC results.")
 
 if __name__ == "__main__":
     main()

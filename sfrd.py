@@ -431,9 +431,7 @@ def main():
     """Main function to process all volumes."""
     # Try to load the main combined data file
     data_files = [
-        'tables/MCMC_results_12.csv',  # Original expected file
-        'combined_columns.csv',         # Based on provided column info
-        'tables/combined_results.csv'   # Alternative location
+        'tables/MCMC_results_combined_filtered.csv'
     ]
     
     data = None

@@ -1,0 +1,37 @@
+=== MCMC RESULTS SUMMARY STATISTICS ===
+
+Total rows: 18897
+Total columns: 73
+
+Dataset distribution:
+  Hec_10: 18897 rows
+
+Model distribution:
+  np: 18897 rows
+
+Valid predictions per model:
+  np: 1031 valid predictions
+  uni: 864 valid predictions
+  skew: 964 valid predictions
+
+Columns with most missing data:
+  Notes: 18865 missing (99.8%)
+  WC_notes: 18851 missing (99.8%)
+  Duplication_flag: 18835 missing (99.7%)
+  Blending_flag: 18816 missing (99.6%)
+  tau_uni: 18033 missing (95.4%)
+  logSFR_today_pred_uni: 18033 missing (95.4%)
+  t_sf_uni: 18033 missing (95.4%)
+  x_uni: 18033 missing (95.4%)
+  A_uni: 18033 missing (95.4%)
+  t_sf_skew: 17933 missing (94.9%)
+  tau_skew: 17933 missing (94.9%)
+  A_skew: 17933 missing (94.9%)
+  x_skew: 17933 missing (94.9%)
+  logSFR_today_pred_skew: 17933 missing (94.9%)
+  logSFR_today_pred_np: 17866 missing (94.5%)
+  x_np: 17866 missing (94.5%)
+  t_sf_np: 17866 missing (94.5%)
+  A_np: 17866 missing (94.5%)
+  tau_np: 17866 missing (94.5%)
+  id_np: 17814 missing (94.3%)
