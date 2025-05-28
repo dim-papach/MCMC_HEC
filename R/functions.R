@@ -187,7 +187,7 @@ combine_model_results <- function(model_names, results_dir = "results",
     model_data_list <- purrr::map(model_names, function(model) {
       stacked_file <- here::here(results_dir, model, "WholeHEC",
                             paste0("stacked_step5_", model, ".csv"))
-      
+
       readr::read_csv(
         stacked_file,
         col_types = readr::cols(
@@ -200,19 +200,19 @@ combine_model_results <- function(model_names, results_dir = "results",
       ) %>%
         dplyr::rename_with(~if_else(.x == "id", .x, paste0(.x, "_", model)), -id)
     })
-    
+
     # Merge all models by id
     combined_results <- purrr::reduce(model_data_list, ~dplyr::full_join(.x, .y, by = "id"))
-    
+
     # Merge with Hec_50 data
     hec_50_data <- readr::read_csv(
       here::here("tables", "Hec_50.csv"),
       show_col_types = FALSE
     ) %>%
       dplyr::rename(id = ID)
-    
+
     final_data <- dplyr::left_join(combined_results, hec_50_data, by = "id")
-    
+
     # Save output
     return(final_data)
   }, error = function(e) {

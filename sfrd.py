@@ -100,29 +100,35 @@ def extract_parameters(df, D):
     
     # Extract parameters for each prior type
     for prior in ['uni', 'np', 'skew']:
-        # Map column name suffixes to variable names
-        suffix_map = {
-            'uni': 'uniform',
-            'np': 'norm', 
-            'skew': 'skew'
-        }
-        key = suffix_map[prior]
+        # Extract parameters - corrected column names based on combined_columns.txt
+        params[f'A_{prior}'] = sub[f'A_{prior}'].values
+        params[f'tau_{prior}'] = (sub[f'tau_{prior}'] * 1e9).values  # Convert from Gyr to years
+        params[f'tstart_{prior}'] = T0 - (sub[f't_sf_{prior}'] * 1e9).values  # Convert to years and calculate start time
+        params[f'sd_A_{prior}'] = sub[f'A_sd'].values if f'A_sd_{prior}' not in sub.columns else sub[f'A_sd_{prior}'].values
+        params[f'sd_tau_{prior}'] = sub[f'tau_sd'].values if f'tau_sd_{prior}' not in sub.columns else sub[f'tau_sd_{prior}'].values
+        params[f'sd_tstart_{prior}'] = (sub[f't_sf_sd'].values if f't_sf_sd_{prior}' not in sub.columns else sub[f't_sf_sd_{prior}'].values) * 1e9
         
-        # Extract parameters
-        params[f'A_{key}'] = sub[f'A_{prior}'].values
-        params[f'tau_{key}'] = (sub[f'tau_{prior}'] * 1e9).values
-        params[f'tstart_{key}'] = T0 - (sub[f't_sf_{prior}'] * 1e9).values
-        params[f'sd_A_{key}'] = sub[f'A_sd_{prior}'].values
-        params[f'sd_tau_{key}'] = (sub[f'tau_sd_{prior}'] * 1e9).values
-        params[f'sd_tstart_{key}'] = (sub[f't_sf_sd_{prior}'] * 1e9).values
+        # Create predicted SFR for filtering if not available
+        if f'logSFR_today_pred_{prior}' in sub.columns:
+            pred_sfr_col = f'logSFR_today_pred_{prior}'
+        elif 'logSFR_today_pred_np' in sub.columns and prior == 'np':
+            pred_sfr_col = 'logSFR_today_pred_np'
+        else:
+            # If no prediction column, skip filtering
+            continue
         
-        # Filter by log difference criterion
-        mask = np.abs(np.log10(sub[f'sfr_{prior}']) - np.log10(sub['SFR_total'])) < 10
+        # Filter by log difference criterion if we have both observed and predicted SFR
+        if 'logSFR_total' in sub.columns and pred_sfr_col in sub.columns:
+            mask = np.abs(sub[pred_sfr_col] - sub['logSFR_total']) < 10
+        else:
+            # If no filtering possible, use all data
+            mask = np.ones(len(sub), dtype=bool)
         
         # Apply mask to parameters
-        for param_name in [f'A_{key}', f'tau_{key}', f'tstart_{key}', 
-                          f'sd_A_{key}', f'sd_tau_{key}', f'sd_tstart_{key}']:
-            params[param_name][~mask] = np.nan
+        for param_name in [f'A_{prior}', f'tau_{prior}', f'tstart_{prior}', 
+                          f'sd_A_{prior}', f'sd_tau_{prior}', f'sd_tstart_{prior}']:
+            if param_name in params:
+                params[param_name][~mask] = np.nan
     
     return params
 
@@ -137,30 +143,34 @@ def plot_sfrd_comparison(redshifts, log_sfr_data, log_sfr_errors, log_sfrd_lm, D
 
     # Plot data for each prior
     markers = ['o-', 's-', 'v-']
-    for i, prior in enumerate(['uniform', 'norm', 'skew']):
-        ax1.errorbar(
-            redshifts, log_sfr_data[prior], yerr=log_sfr_errors[prior],
-            fmt=markers[i], capsize=3, label=f"{prior.capitalize()} Prior", markersize=4
-        )
+    prior_labels = {'uni': 'Uniform', 'np': 'Normal', 'skew': 'Skewed'}
+    for i, prior in enumerate(['uni', 'np', 'skew']):
+        if prior in log_sfr_data:
+            ax1.errorbar(
+                redshifts, log_sfr_data[prior], yerr=log_sfr_errors[prior],
+                fmt=markers[i], capsize=3, label=f"{prior_labels[prior]} Prior", markersize=4
+            )
     
     # Plot Lilly-Madau SFRD from ir and uv data
-    log_v = ir["log_v"]
-    log_v_upper = ir["log_v_upper_error"]
-    log_v_lower = ir["log_v_lower_error"]
-    z_min = ir['z_min']
-    z_max = ir['z_max']
-    z = np.mean([z_min, z_max], axis=0)
-    z_error = (z_max- z_min).replace(0, 0.001) / 2  # Avoid division by zero
-    ax1.errorbar(z, log_v,xerr=z_error , yerr=[log_v_lower, log_v_upper], fmt='o', capsize=3, label='MD14 (IR)', markersize=4, color='orange')
+    if ir is not None and not ir.empty:
+        log_v = ir["log_v"]
+        log_v_upper = ir["log_v_upper_error"]
+        log_v_lower = ir["log_v_lower_error"]
+        z_min = ir['z_min']
+        z_max = ir['z_max']
+        z = np.mean([z_min, z_max], axis=0)
+        z_error = (z_max- z_min).replace(0, 0.001) / 2  # Avoid division by zero
+        ax1.errorbar(z, log_v,xerr=z_error , yerr=[log_v_lower, log_v_upper], fmt='o', capsize=3, label='MD14 (IR)', markersize=4, color='orange')
 
-    log_v = uv["log_v"]
-    log_v_upper = uv["log_v_upper_error"]
-    log_v_lower = uv["log_v_lower_error"]
-    z_min = uv['z_min']
-    z_max = uv['z_max']
-    z = np.mean([z_min, z_max], axis=0)
-    z_error = (z_max - z_min).replace(0, 0.001) / 2  # Avoid division by zero
-    ax1.errorbar(z, log_v,xerr=z_error , yerr=[log_v_lower, log_v_upper], fmt='o', capsize=3, label='MD14 (UV)', markersize=4, color='red')
+    if uv is not None and not uv.empty:
+        log_v = uv["log_v"]
+        log_v_upper = uv["log_v_upper_error"]
+        log_v_lower = uv["log_v_lower_error"]
+        z_min = uv['z_min']
+        z_max = uv['z_max']
+        z = np.mean([z_min, z_max], axis=0)
+        z_error = (z_max - z_min).replace(0, 0.001) / 2  # Avoid division by zero
+        ax1.errorbar(z, log_v,xerr=z_error , yerr=[log_v_lower, log_v_upper], fmt='o', capsize=3, label='MD14 (UV)', markersize=4, color='red')
 
     # Plot Lilly-Madau reference
     ax1.plot(redshifts, log_sfrd_lm, 'k--', linewidth=2, label="Lilly-Madau (2014)")
@@ -191,12 +201,14 @@ def plot_residuals(redshifts, log_sfrd_lm, log_sfr_data, log_sfr_errors, D,
 
     # Calculate and plot residuals for each prior
     markers = ['o-', 's-', 'v-']
-    for i, prior in enumerate(['uniform', 'norm', 'skew']):
-        residuals = log_sfrd_lm - log_sfr_data[prior]
-        ax1.errorbar(
-            redshifts, residuals, yerr=log_sfr_errors[prior],
-            fmt=markers[i], capsize=3, label=f"{prior.capitalize()} Prior", markersize=4
-        )
+    prior_labels = {'uni': 'Uniform', 'np': 'Normal', 'skew': 'Skewed'}
+    for i, prior in enumerate(['uni', 'np', 'skew']):
+        if prior in log_sfr_data:
+            residuals = log_sfrd_lm - log_sfr_data[prior]
+            ax1.errorbar(
+                redshifts, residuals, yerr=log_sfr_errors[prior],
+                fmt=markers[i], capsize=3, label=f"{prior_labels[prior]} Prior", markersize=4
+            )
     
     ax1.axhline(0, color='k', linestyle='--', alpha=0.7)
     ax1.axvline(x=1.86, color='r', linestyle='--', alpha=0.5)
@@ -224,16 +236,18 @@ def plot_ratio(redshifts, sfrd_lilly_madau, total_sfr_data, total_sfr_errors, D,
 
     # Calculate and plot ratios for each prior
     markers = ['o-', 's-', 'v-']
-    for i, prior in enumerate(['uniform', 'norm', 'skew']):
-        # Calculate ratio and its error avoiding division by zero
-        ratio = sfrd_lilly_madau / total_sfr_data[prior]
-        ratio[total_sfr_data[prior] == 0] = np.nan
-        
-        ratio_err = ratio_error(total_sfr_data[prior], total_sfr_errors[prior], sfrd_lilly_madau)
-        ax1.errorbar(
-            redshifts, ratio, yerr=ratio_err,
-            fmt=markers[i], capsize=3, label=f"{prior.capitalize()} Prior", markersize=4
-        )
+    prior_labels = {'uni': 'Uniform', 'np': 'Normal', 'skew': 'Skewed'}
+    for i, prior in enumerate(['uni', 'np', 'skew']):
+        if prior in total_sfr_data:
+            # Calculate ratio and its error avoiding division by zero
+            ratio = sfrd_lilly_madau / total_sfr_data[prior]
+            ratio[total_sfr_data[prior] == 0] = np.nan
+            
+            ratio_err = ratio_error(total_sfr_data[prior], total_sfr_errors[prior], sfrd_lilly_madau)
+            ax1.errorbar(
+                redshifts, ratio, yerr=ratio_err,
+                fmt=markers[i], capsize=3, label=f"{prior_labels[prior]} Prior", markersize=4
+            )
     
     ax1.axhline(1, color='k', linestyle='--', alpha=0.7)
     ax1.axvline(x=1.86, color='r', linestyle='--', alpha=0.5)
@@ -252,23 +266,26 @@ def plot_ratio(redshifts, sfrd_lilly_madau, total_sfr_data, total_sfr_errors, D,
     plt.close()
 
 
-def plot_valid_galaxies(redshifts, total_sfr_norm, n_valid_norm, D):
+def plot_valid_galaxies(redshifts, total_sfr_data, n_valid_data, D):
     """Plot SFRD vs. number of valid galaxies."""
     fig, ax1 = plt.subplots(figsize=(10, 6))
     ax2 = ax1.twinx()
     
-    # SFRD (left axis)
-    ax1.plot(redshifts, np.log10(total_sfr_norm), 'b-', label='SFRD (Norm Prior)')
+    # SFRD (left axis) - use 'np' prior if available
+    if 'np' in total_sfr_data:
+        ax1.plot(redshifts, np.log10(total_sfr_data['np']), 'b-', label='SFRD (Normal Prior)')
+        ax2.plot(redshifts, n_valid_data['np'], 'r--', label='Valid Galaxies (t > 0)')
+    elif 'uni' in total_sfr_data:
+        ax1.plot(redshifts, np.log10(total_sfr_data['uni']), 'b-', label='SFRD (Uniform Prior)')
+        ax2.plot(redshifts, n_valid_data['uni'], 'r--', label='Valid Galaxies (t > 0)')
+    
     ax1.set_xlabel("Redshift")
     ax1.set_ylabel(r"$\log_{10}(\text{SFRD})$ [M$_\odot$ yr$^{-1}$ Mpc$^{-3}$]")
-    
-    # Valid galaxies (right axis)
-    ax2.plot(redshifts, n_valid_norm, 'r--', label='Valid Galaxies (t > 0)')
     ax2.set_ylabel("Number of Valid Galaxies")
     
     ax1.legend(loc='upper left')
     ax2.legend(loc='upper right')
-    plt.title(f"SFRD vs. Valid Galaxies (Normal Prior, D = {D} Mpc)")
+    plt.title(f"SFRD vs. Valid Galaxies (D = {D} Mpc)")
     plt.savefig(f"sfrd_plots/valid_galaxies_D{D}.png")
     plt.close()
 
@@ -297,23 +314,34 @@ def process_volume(D, data, ir, uv):
     
     # Compute SFRs for each prior
     results = {}
-    for prior in ['uniform', 'norm', 'skew']:
-        total_sfr, total_sfr_error, n_valid = compute_total_sfr_and_error(
-            REDSHIFTS, 
-            params[f'tstart_{prior}'], params[f'sd_tstart_{prior}'],
-            params[f'A_{prior}'], params[f'tau_{prior}'], V,
-            params[f'sd_A_{prior}'], params[f'sd_tau_{prior}']
-        )
-        
-        # Store results
-        results[f'total_sfr_{prior}'] = total_sfr
-        results[f'total_sfr_error_{prior}'] = total_sfr_error
-        results[f'n_valid_{prior}'] = n_valid
-        
-        # Compute log values
-        log_sfr, log_sfr_error = compute_log_sfr_and_error(total_sfr, total_sfr_error)
-        results[f'log_sfr_{prior}'] = log_sfr
-        results[f'log_sfr_error_{prior}'] = log_sfr_error
+    available_priors = []
+    
+    for prior in ['uni', 'np', 'skew']:
+        # Check if parameters exist for this prior
+        required_params = [f'tstart_{prior}', f'sd_tstart_{prior}', f'A_{prior}', f'tau_{prior}']
+        if all(f'{param}' in params for param in required_params):
+            available_priors.append(prior)
+            
+            total_sfr, total_sfr_error, n_valid = compute_total_sfr_and_error(
+                REDSHIFTS, 
+                params[f'tstart_{prior}'], params[f'sd_tstart_{prior}'],
+                params[f'A_{prior}'], params[f'tau_{prior}'], V,
+                params.get(f'sd_A_{prior}'), params.get(f'sd_tau_{prior}')
+            )
+            
+            # Store results
+            results[f'total_sfr_{prior}'] = total_sfr
+            results[f'total_sfr_error_{prior}'] = total_sfr_error
+            results[f'n_valid_{prior}'] = n_valid
+            
+            # Compute log values
+            log_sfr, log_sfr_error = compute_log_sfr_and_error(total_sfr, total_sfr_error)
+            results[f'log_sfr_{prior}'] = log_sfr
+            results[f'log_sfr_error_{prior}'] = log_sfr_error
+    
+    if not available_priors:
+        print(f"Warning: No valid priors found for D = {D} Mpc")
+        return
     
     # Lilly-Madau calculations
     sfrd_lilly_madau = lilly_madau(REDSHIFTS)
@@ -324,29 +352,18 @@ def process_volume(D, data, ir, uv):
     co_moving_distances = comoving_distance(REDSHIFT_TICKS) / 1000
     
     # Group data for plotting
-    log_sfr_data = {
-        'uniform': results['log_sfr_uniform'],
-        'norm': results['log_sfr_norm'],
-        'skew': results['log_sfr_skew']
-    }
+    log_sfr_data = {}
+    log_sfr_errors = {}
+    total_sfr_data = {}
+    total_sfr_errors = {}
+    n_valid_data = {}
     
-    log_sfr_errors = {
-        'uniform': results['log_sfr_error_uniform'],
-        'norm': results['log_sfr_error_norm'],
-        'skew': results['log_sfr_error_skew']
-    }
-    
-    total_sfr_data = {
-        'uniform': results['total_sfr_uniform'],
-        'norm': results['total_sfr_norm'],
-        'skew': results['total_sfr_skew']
-    }
-    
-    total_sfr_errors = {
-        'uniform': results['total_sfr_error_uniform'],
-        'norm': results['total_sfr_error_norm'],
-        'skew': results['total_sfr_error_skew']
-    }
+    for prior in available_priors:
+        log_sfr_data[prior] = results[f'log_sfr_{prior}']
+        log_sfr_errors[prior] = results[f'log_sfr_error_{prior}']
+        total_sfr_data[prior] = results[f'total_sfr_{prior}']
+        total_sfr_errors[prior] = results[f'total_sfr_error_{prior}']
+        n_valid_data[prior] = results[f'n_valid_{prior}']
     
     # Create plots
     plt.style.use('bmh')
@@ -371,51 +388,98 @@ def process_volume(D, data, ir, uv):
     )
     
     # Valid galaxies plot
-    plot_valid_galaxies(
-        REDSHIFTS, results['total_sfr_norm'], results['n_valid_norm'], D
-    )
+    plot_valid_galaxies(REDSHIFTS, total_sfr_data, n_valid_data, D)
     
     # Calculate z=1.86 values
     z_186 = np.array([1.86])
     sfrd_lm_186 = lilly_madau(1.86)
     
-    # Calculate SFR at z=1.86 for each prior
+    # Calculate SFR at z=1.86 for each available prior
     ratios_186 = {}
-    for prior in ['uniform', 'norm', 'skew']:
+    for prior in available_priors:
         sfr_186, _, _ = compute_total_sfr_and_error(
             z_186, 
             params[f'tstart_{prior}'], params[f'sd_tstart_{prior}'],
             params[f'A_{prior}'], params[f'tau_{prior}'], V,
-            params[f'sd_A_{prior}'], params[f'sd_tau_{prior}']
+            params.get(f'sd_A_{prior}'), params.get(f'sd_tau_{prior}')
         )
-        ratios_186[prior] = sfrd_lm_186 / sfr_186[0]
+        if sfr_186[0] > 0:
+            ratios_186[prior] = sfrd_lm_186 / sfr_186[0]
+        else:
+            ratios_186[prior] = np.nan
     
     # Print results at z=1.86
     print(f"\nD = {D} Mpc results at z=1.86:")
-    print(f"Uniform Prior ratio: {ratios_186['uniform']:.2f}")
-    print(f"Normal Prior ratio: {ratios_186['norm']:.2f}")
-    print(f"Skew Prior ratio: {ratios_186['skew']:.2f}")
+    prior_labels = {'uni': 'Uniform', 'np': 'Normal', 'skew': 'Skewed'}
+    for prior in available_priors:
+        if not np.isnan(ratios_186[prior]):
+            print(f"{prior_labels[prior]} Prior ratio: {ratios_186[prior]:.2f}")
+        else:
+            print(f"{prior_labels[prior]} Prior ratio: undefined (SFR = 0)")
     
     # Print when n_valid_galaxies is 0
-    for i, count in enumerate(results['n_valid_norm']):
-        if count == 0:
-            print(f"At redshift {REDSHIFTS[i]:.2f}, no valid galaxies (t > 0) for D = {D} Mpc.")
-            break
-    else:
-        print(f"All redshifts have valid galaxies (t > 0) for D = {D} Mpc.")
+    for prior in available_priors:
+        for i, count in enumerate(results[f'n_valid_{prior}']):
+            if count == 0:
+                print(f"At redshift {REDSHIFTS[i]:.2f}, no valid galaxies (t > 0) for D = {D} Mpc ({prior_labels[prior]} prior).")
+                break
+        else:
+            print(f"All redshifts have valid galaxies (t > 0) for D = {D} Mpc ({prior_labels[prior]} prior).")
 
 
 def main():
     """Main function to process all volumes."""
-    # Load data once at start
-    data = pd.read_csv('tables/MCMC_results_12.csv')
-    ir = pd.read_csv('tables/LM_ir.csv')
-    uv = pd.read_csv('tables/LM_uv.csv')
+    # Try to load the main combined data file
+    data_files = [
+        'tables/MCMC_results_12.csv',  # Original expected file
+        'combined_columns.csv',         # Based on provided column info
+        'tables/combined_results.csv'   # Alternative location
+    ]
+    
+    data = None
+    for file_path in data_files:
+        try:
+            if os.path.exists(file_path):
+                print(f"Loading data from: {file_path}")
+                data = pd.read_csv(file_path)
+                break
+        except Exception as e:
+            print(f"Error loading {file_path}: {e}")
+            continue
+    
+    if data is None:
+        print("Error: Could not load main data file. Please check file paths.")
+        print("Expected files:", data_files)
+        return
+    
+    # Try to load reference data
+    ir = None
+    uv = None
+    
+    try:
+        if os.path.exists('tables/LM_ir.csv'):
+            ir = pd.read_csv('tables/LM_ir.csv')
+    except Exception as e:
+        print(f"Warning: Could not load IR reference data: {e}")
+    
+    try:
+        if os.path.exists('tables/LM_uv.csv'):
+            uv = pd.read_csv('tables/LM_uv.csv')
+    except Exception as e:
+        print(f"Warning: Could not load UV reference data: {e}")
+    
+    print(f"Data shape: {data.shape}")
+    print(f"Available columns: {list(data.columns)}")
     
     # Process each diameter combination
     for D_pair in D_VALUES:
         for D in D_pair:
-            process_volume(D, data, ir, uv)
+            print(f"\nProcessing D = {D} Mpc...")
+            try:
+                process_volume(D, data, ir, uv)
+            except Exception as e:
+                print(f"Error processing D = {D} Mpc: {e}")
+                continue
 
 
 if __name__ == "__main__":

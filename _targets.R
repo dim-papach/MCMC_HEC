@@ -7,6 +7,7 @@ tar_source()
 
 chains <- 6
 parallel_chains <- 6
+threads_chain <- 2
 sample_size <- 5000
 warmup <- 2500
 
@@ -108,22 +109,12 @@ list(
         data            = stan_data,
         chains          = chains,
         parallel_chains = parallel_chains,
+        threads_per_chain = threads_chain,
         iter_sampling   = sample_size,
         iter_warmup     = warmup,
         init            = init_vals,
         refresh         = 100,
         max_treedepth   = 12,
-      )
-      # Save the fit object to the output directory .mcmc_models
-      output_dir <- here::here(".mcmc_models",data_list$data_name)
-      dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
-
-      fit$summary()
-
-      qs::qsave(
-        x=fit,
-        file = file.path(output_dir, paste0(model_list$names, ".qs")),
-        nthread = 3
       )
 
       # Return fit object
@@ -168,12 +159,12 @@ list(
         summary_row <- fit_model$fit$summary(variable = param)
         tibble::tibble(
           "{param}_{suffix}" := summary_row$mean,
-          "{param}_sd" := summary_row$sd
+          "{param}_sd_{suffix}" := summary_row$sd
         )
       })
 
       # Save combined summary
-      combined_file <- file.path(output_dir, paste0("combined_summary_", suffix, ".csv"))
+      combined_file <- file.path(output_dir, "combined_summary_{suffix}.csv")
       readr::write_csv(combined_summary, combined_file)
 
       # Return all created files
@@ -219,5 +210,4 @@ list(
     pattern = map(fit_model),
     format = "file"
   )
-
 )

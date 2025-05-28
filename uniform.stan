@@ -25,21 +25,21 @@ parameters {
 }
 
 transformed parameters {
-  
+
   vector[N] x = t_sf./tau;
   vector[N] logSFR_today;                   // Modeled log SFR for each data point
   real log10_e = log10(exp(1));             // Constant for ln to log10 conversion (log10(e))
 
   // Compute A for each galaxy using the full normalization equation
   vector[N]  A = (M_star .* zeta) ./ (1 - (x + 1) .* exp(-x));
-  
+
   // Calculate modeled log SFR at the present time for each galaxy
-  logSFR_today = log10(A) -9 + log10(x)- log10(tau)- (x) * log10_e; 
+  logSFR_today = log10(A) -9 + log10(x)- log10(tau)- (x) * log10_e;
   // 1/yr=10^9/Gyr from SFR// Subtract exponential decay term
 }
 
 model {
-  /* 
+  /*
     Bayesian model specification:
     - Priors on parameters (t_sf, logtau).
     - Likelihood: Observed log SFR is modeled as normally distriiiibuted around the predicted value.
